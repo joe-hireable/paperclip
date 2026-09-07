@@ -5,9 +5,15 @@ import { createStore, type Store } from "./store.js";
 
 export interface Connection extends Transport {
   readonly authenticatedIdentity?: { workspaceId: string; botUserId: string | null; botId: string };
+  connectionStatus?(): ConnectionStatus;
   isConnected(): boolean;
   start(receive: (body: unknown, ack: () => Promise<void>) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
+}
+export interface ConnectionStatus {
+  state: "connecting" | "connected" | "error";
+  lastFailure: "network_error" | "rate_limited" | "authentication_failed" | "permission_denied" | "workspace_mismatch" | "provider_error" | "connection_timeout" | "connection_lost" | "cleanup_failed" | null;
+  retryAt: number | null;
 }
 export type Connect = (config: Config, companyId: string) => Promise<Connection>;
 
@@ -50,14 +56,16 @@ export function createRuntime(ctx: PluginContext, connect: Connect) {
   // invocation. Its timer therefore uses the host-authorised proactive company
   // scope instead of inheriting an invocation that expires when config returns.
   const timer = setInterval(() => {
-    void activeControl?.drain().catch(() => ctx.logger.warn("Slack inbox could not be processed; inspect plugin status."));
+    if (connection?.isConnected()) void activeControl?.drain().catch(() => ctx.logger.warn("Slack inbox could not be processed; inspect plugin status."));
   }, 10_000);
   timer.unref();
-  const health = () => state === "connected" && !connection?.isConnected() ? "connecting" : state;
+  const health = () => state === "connected" ? connection?.connectionStatus?.().state ?? (connection?.isConnected() ? "connected" : "connecting") : state;
   async function stop() {
     activeControl = null;
-    const previous = connection; connection = null;
-    if (previous) { try { await previous.stop(); } catch { ctx.logger.warn("Slack connection shutdown could not be confirmed."); } }
+    // Keep a failed shutdown attached: replacing an unconfirmed live connection
+    // could consume another socket's events. Recovery then needs a worker restart.
+    if (connection) await connection.stop();
+    connection = null;
   }
   return {
     configure(value: unknown, companyId: string | null) {
@@ -77,7 +85,7 @@ export function createRuntime(ctx: PluginContext, connect: Connect) {
         if (version !== generation) { await next.stop(); return; }
         connection = next;
         const current = () => generation === version && connection === next;
-        const control = createControl(ctx, companyId, config, store, next, current);
+        const control = createControl(ctx, companyId, config, store, next, () => current() && next.isConnected());
         await next.start(async (body, ack) => {
           if (!current()) return; // Leave old-connection events unacknowledged for redelivery.
           await receiveEvent(body, ack, config, control.enqueue, diagnostics);
@@ -87,7 +95,7 @@ export function createRuntime(ctx: PluginContext, connect: Connect) {
         state = "connected";
       }).catch(async () => {
         state = "error";
-        await stop();
+        try { await stop(); } catch { ctx.logger.warn("Slack connection shutdown could not be confirmed."); }
         ctx.logger.error("Slack Control configuration or connection failed; inspect secret references and workspace mapping.");
         throw new Error("Slack Control could not connect. No credential or provider response is included in diagnostics.");
       });
@@ -96,7 +104,7 @@ export function createRuntime(ctx: PluginContext, connect: Connect) {
     async status(companyId: string) {
       if (!uuid(companyId) || (configuredCompany && configuredCompany !== companyId)) throw new Error("Company scope mismatch");
       const identity = connection?.authenticatedIdentity;
-      return { state: health(), authenticatedIdentity: identity ? {
+      return { state: health(), connection: connection?.connectionStatus?.() ?? null, authenticatedIdentity: identity ? {
         workspaceId: identity.workspaceId, botUserId: identity.botUserId, botId: identity.botId,
       } : null, diagnostics: { ...diagnostics }, recent: store ? await store.recent() : [] };
     },

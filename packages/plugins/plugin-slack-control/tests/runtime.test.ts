@@ -99,4 +99,49 @@ describe("acknowledgement and connection lifecycle", () => {
       expect((await runtime.status(company)).authenticatedIdentity).toBeNull();
     } finally { await runtime.shutdown(); }
   });
+  it("keeps received commands queued while offline, then rechecks company membership after recovery", async () => {
+    vi.useFakeTimers();
+    let connected = false;
+    let receive!: (body: unknown, ack: () => Promise<void>) => Promise<void>;
+    const connection: Connection = { isConnected: () => connected, start: vi.fn(async (handler) => { receive = handler; }), stop: vi.fn(), verifyDirectMessage: vi.fn().mockResolvedValue(true), reply: vi.fn() };
+    const { ctx, api } = host(database(pg)); const runtime = createRuntime(ctx, async () => connection);
+    try {
+      await runtime.configure(config, company);
+      await receive(envelope({ text: "status" }), vi.fn());
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect((await runtime.status(company)).recent[0]?.phase).toBe("received");
+      expect(api.access.members.list).not.toHaveBeenCalled();
+      // Recovery does not bypass revocation that happened during the outage.
+      api.access.members.list.mockResolvedValue([]); connected = true;
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(async () => expect((await runtime.status(company)).recent[0]?.phase).toBe("uncertain"));
+      expect(api.access.members.list).toHaveBeenCalledWith({ companyId: company });
+      expect(api.issues.list).not.toHaveBeenCalled(); expect(connection.reply).not.toHaveBeenCalled();
+    } finally { await runtime.shutdown(); vi.useRealTimers(); }
+  });
+  it("awaits confirmed shutdown before replacement and refuses replacement if cleanup fails", async () => {
+    let release!: () => void;
+    const connection: Connection = { isConnected: () => false, start: vi.fn(), stop: vi.fn(() => new Promise<void>((resolve) => { release = resolve; })), verifyDirectMessage: vi.fn(), reply: vi.fn() };
+    const connect = vi.fn(async () => connection);
+    const { ctx } = host(database(pg)); const runtime = createRuntime(ctx, connect);
+    await runtime.configure(config, company);
+    const replacing = runtime.configure(config, company);
+    await vi.waitFor(() => expect(connection.stop).toHaveBeenCalledTimes(1));
+    expect(connect).toHaveBeenCalledTimes(1);
+    release(); await replacing; expect(connect).toHaveBeenCalledTimes(2);
+    vi.mocked(connection.stop).mockRejectedValue(new Error("synthetic-private-cleanup-error"));
+    await expect(runtime.configure(config, company)).rejects.toThrow("No credential or provider response");
+    expect(connect).toHaveBeenCalledTimes(2); expect(runtime.health()).toBe("error");
+    vi.mocked(connection.stop).mockResolvedValue(undefined); await runtime.shutdown();
+  });
+  it("reports terminal connection failures to board status and health", async () => {
+    const connection: Connection = { connectionStatus: () => ({ state: "error", lastFailure: "authentication_failed", retryAt: null }), isConnected: () => false, start: vi.fn(), stop: vi.fn(), verifyDirectMessage: vi.fn(), reply: vi.fn() };
+    const { ctx } = host(database(pg)); const runtime = createRuntime(ctx, async () => connection);
+    try {
+      await runtime.configure(config, company);
+      expect(runtime.health()).toBe("error");
+      expect((await runtime.status(company)).connection).toEqual({ state: "error", lastFailure: "authentication_failed", retryAt: null });
+      await expect(runtime.status(otherCompany)).rejects.toThrow("Company scope mismatch");
+    } finally { await runtime.shutdown(); }
+  });
 });
