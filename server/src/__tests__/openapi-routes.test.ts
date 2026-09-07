@@ -4,7 +4,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
+import { createExecutionBindingSchema } from "@paperclipai/shared/execution-bindings";
 import { COMPANY_IMPORT_TRANSFERS_ROUTE_PATH } from "@paperclipai/shared/company-import-transfer";
+import { intelligentRoutingContractInputSchema } from "../services/intelligent-routing-contracts.js";
 import { errorHandler } from "../middleware/index.js";
 import { buildOpenApiSpec, openApiRoutes } from "../routes/openapi.js";
 
@@ -33,6 +36,7 @@ const apiPrefixes: Record<string, string> = {
   "decisions.ts": "/api",
   "decision-training.ts": "/api",
   "environments.ts": "/api",
+  "execution-bindings.ts": "/api",
   "execution-workspaces.ts": "/api",
   "file-resources.ts": "/api",
   "folders.ts": "/api",
@@ -42,6 +46,7 @@ const apiPrefixes: Record<string, string> = {
   "inbox-dismissals.ts": "/api",
   "instance-database-backups.ts": "/api",
   "instance-settings.ts": "/api",
+  "intelligent-routing.ts": "/api",
   "issues.ts": "/api",
   "issue-tree-control.ts": "/api",
   "llms.ts": "/api",
@@ -144,7 +149,12 @@ function loadActualRoutes() {
       continue;
     }
 
-    for (const match of source.matchAll(ROUTE_LITERAL_PATTERN)) {
+    // This router composes four paths from a local literal base. Resolve that
+    // declared value instead of excluding its operations from exact coverage.
+    const routeSource = file === "intelligent-routing.ts"
+      ? source.replaceAll("${base}", source.match(/const base = "([^"]+)";/)?.[1] ?? "${unresolvedBase}")
+      : source;
+    for (const match of routeSource.matchAll(ROUTE_LITERAL_PATTERN)) {
       const method = match[1].toUpperCase();
       const routePath = match[2];
       routes.add(`${method} ${normalizeExpressPath(resolveMountedPath(file, prefix, routePath))}`);
@@ -282,6 +292,81 @@ describe("openapi routes", () => {
       missingInSpec: [],
       extraInSpec: [],
     });
+  });
+
+  it("publishes all qualified routing operations with board-only company access", () => {
+    const { spec } = loadSpecRoutes();
+    const bindings = "/api/companies/{companyId}/execution-bindings";
+    const run = "/api/companies/{companyId}/runs/{runId}/execution-binding";
+    const routing = "/api/companies/{companyId}/issues/{issueId}/intelligent-routing";
+    for (const [method, route] of [
+      ["get", bindings], ["post", bindings], ["post", `${bindings}/preview`],
+      ["post", `${bindings}/{bindingId}/disable`], ["get", run], ["post", `${run}/reconcile`],
+      ["get", `${routing}/context`], ["get", `${routing}/contracts/latest`],
+      ["post", `${routing}/preview`], ["post", `${routing}/contracts`],
+    ]) {
+      const operation = spec.paths[route]?.[method];
+      expect(operation, `${method} ${route}`).toBeDefined();
+      expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(operation.responses["403"]).toBeDefined();
+      expect(operation.parameters).toContainEqual({
+        name: "companyId", in: "path", required: true, schema: { type: "string" },
+      });
+    }
+    expect(spec.paths[`${routing}/contracts`].post.responses["201"]).toBeDefined();
+    expect(spec.paths[`${routing}/preview`].post.responses["409"]).toBeDefined();
+    expect(spec.paths[`${routing}/contracts`].post.responses["422"]).toBeDefined();
+  });
+
+  it("keeps routing request strictness and bounds aligned with the actual validators", () => {
+    const { spec } = loadSpecRoutes();
+    const binding = spec.paths["/api/companies/{companyId}/execution-bindings"].post;
+    const routing = "/api/companies/{companyId}/issues/{issueId}/intelligent-routing";
+    const body = (operation: Record<string, any>) => operation.requestBody.content["application/json"].schema;
+    expect(body(binding)).toEqual(z.toJSONSchema(createExecutionBindingSchema, { target: "openapi-3.0", io: "input" }));
+    expect(body(binding)).toMatchObject({ additionalProperties: false, properties: {
+      models: { minItems: 1, maxItems: 1 },
+      allowedAgentIds: { minItems: 1, maxItems: 100 },
+    } });
+    for (const endpoint of ["preview", "contracts"]) {
+      const operation = spec.paths[`${routing}/${endpoint}`].post;
+      expect(body(operation)).toEqual(z.toJSONSchema(intelligentRoutingContractInputSchema, { target: "openapi-3.0", io: "input" }));
+      expect(body(operation)).toMatchObject({ additionalProperties: false, properties: {
+        expectedRevision: { type: "integer", minimum: 0 },
+        expectedInputDigest: { pattern: "^[a-f0-9]{64}$" },
+        candidates: { minItems: 1, maxItems: 32, items: { additionalProperties: false, properties: {
+          evaluations: { maxItems: 1 },
+          profile: { additionalProperties: false },
+        } } },
+      } });
+      expect(operation.description).toContain("4,096");
+      expect(operation.description).toContain("1 MiB");
+    }
+    const reconcile = body(spec.paths["/api/companies/{companyId}/runs/{runId}/execution-binding/reconcile"].post);
+    expect(reconcile).toMatchObject({ additionalProperties: false, properties: {
+      checkpointRef: { minLength: 1, maxLength: 500 },
+      pendingEffectsReviewed: { enum: [true] },
+    } });
+  });
+
+  it("documents routing evidence, nullable reads and the private lease-owner omission", () => {
+    const { spec } = loadSpecRoutes();
+    const routing = "/api/companies/{companyId}/issues/{issueId}/intelligent-routing";
+    const lease = spec.paths["/api/companies/{companyId}/runs/{runId}/execution-binding"].get.responses["200"].content["application/json"].schema;
+    expect(lease.nullable).toBe(true);
+    expect(lease.properties.ownerId).toBeUndefined();
+    expect(lease.properties).toHaveProperty("processHistory");
+    const latest = spec.paths[`${routing}/contracts/latest`].get.responses["200"].content["application/json"].schema;
+    expect(latest.nullable).toBe(true);
+    expect(latest.properties).toHaveProperty("candidateEvidenceSnapshot");
+    const preview = spec.paths[`${routing}/preview`].post.responses["200"].content["application/json"].schema;
+    expect(JSON.stringify(preview.properties.decision)).toContain('"capacityReserved"');
+    expect(JSON.stringify(preview.properties.decision)).toContain('"no_selection"');
+    const context = spec.paths[`${routing}/context`].get.responses["200"].content["application/json"].schema;
+    expect(context.properties).toHaveProperty("documentRevisionDigests");
+    expect(context.properties).toHaveProperty("profiles");
+    expect(JSON.stringify(context)).not.toContain('"adapterConfig"');
   });
 
   it("documents auth and reviewed response-code invariants", () => {

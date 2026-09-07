@@ -1416,6 +1416,9 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
       const eventSequenceUniquenessHash = await migrationHash(
         "0235_heartbeat_run_event_sequence_uniqueness.sql",
       );
+      const intelligentRoutingContractsHash = await migrationHash(
+        "0242_mysterious_squadron_sinister.sql",
+      );
       const sql = postgres(connectionString, { max: 1, onnotice: () => {} });
       const companyId = "10000000-0000-4000-8000-000000000227";
       const agentId = "20000000-0000-4000-8000-000000000227";
@@ -1436,6 +1439,8 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
 
       try {
         await sql.unsafe(`
+          -- The later routing FK depends on the issue index this fixture rewinds.
+          DROP TABLE IF EXISTS intelligent_routing_contracts;
           DROP TABLE IF EXISTS status_decision_effects, status_decisions, work_assessments,
             native_run_finalizations, native_run_results, completion_contracts CASCADE;
           DROP TRIGGER IF EXISTS paperclip_issue_status_version_trigger ON issues;
@@ -1473,6 +1478,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
         `);
         await sql`DELETE FROM "drizzle"."__drizzle_migrations" WHERE "hash" = ${nativePersistenceHash}`;
         await sql`DELETE FROM "drizzle"."__drizzle_migrations" WHERE "hash" = ${eventSequenceUniquenessHash}`;
+        await sql`DELETE FROM "drizzle"."__drizzle_migrations" WHERE "hash" = ${intelligentRoutingContractsHash}`;
         await sql`
           INSERT INTO companies (id, name, issue_prefix)
           VALUES (${companyId}, 'Native persistence fixture', 'NPF')
@@ -1574,6 +1580,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
 
         const nativeRowsBefore = await verifySql.unsafe<{ table_name: string; row_count: number }[]>(`
           SELECT 'completion_contracts' AS table_name, count(*)::int AS row_count FROM completion_contracts
+          UNION ALL SELECT 'intelligent_routing_contracts', count(*)::int FROM intelligent_routing_contracts
           UNION ALL SELECT 'native_run_results', count(*)::int FROM native_run_results
           UNION ALL SELECT 'native_run_finalizations', count(*)::int FROM native_run_finalizations
           UNION ALL SELECT 'work_assessments', count(*)::int FROM work_assessments
