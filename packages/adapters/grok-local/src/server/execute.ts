@@ -44,6 +44,7 @@ import { DEFAULT_GROK_LOCAL_MODEL } from "../index.js";
 import { copyBackGrokAuth } from "./grok-auth-copyback.js";
 import { resolveManagedGrokHomeDir, stageGrokHomeForSync } from "./grok-home.js";
 import { isGrokUnknownSessionError, parseGrokJsonl } from "./parse.js";
+import { readGrokInstructions } from "./instructions.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -204,12 +205,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   // Grok's --rules accepts text, not an @file reference. Read once per run so
   // concurrent agents never create, replace or remove a shared Agents.md.
-  const rules = rulesSource ? await fs.readFile(rulesSource, "utf8") : null;
-  if (rules !== null && Buffer.byteLength(rules, "utf8") > 64 * 1024) {
-    throw new Error(
-      "Grok inline instructions exceed the 64 KiB UTF-8 limit for --rules. Reduce the instruction file and keep larger reference material in separate files.",
-    );
-  }
+  const rules = rulesSource ? await readGrokInstructions(rulesSource) : null;
   const stagedAssets = await stageGrokProjectAssets({
     cwd,
     skillEntries: grokSkillEntries,
