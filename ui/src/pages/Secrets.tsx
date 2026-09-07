@@ -608,7 +608,7 @@ function buildProviderVaultConfig(form: ProviderVaultForm): Record<string, unkno
     case "gcp_secret_manager":
       return {
         projectId: compact(form.projectId),
-        location: compact(form.location),
+        location: "global",
         namespace: compact(form.namespace),
         secretNamePrefix: compact(form.secretNamePrefix),
       };
@@ -3806,7 +3806,10 @@ function ProviderVaultFields({
     return (
       <div className="grid gap-3 sm:grid-cols-2">
         <TextField label="Project ID or number" value={form.projectId} onChange={(value) => setField("projectId", value)} placeholder="paperclip-prod" required />
-        <TextField label="Location (global only)" value={form.location} onChange={(value) => setField("location", value)} placeholder="global" />
+        <div>
+          <label className="text-xs font-medium" htmlFor="provider-vault-location">Location (global only)</label>
+          <Input id="provider-vault-location" value="global" readOnly />
+        </div>
         <TextField label="Secret name prefix" value={form.secretNamePrefix} onChange={(value) => setField("secretNamePrefix", value)} placeholder="paperclip" />
       </div>
     );

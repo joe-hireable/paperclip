@@ -423,6 +423,41 @@ describe("Secrets page layout", () => {
     await act(async () => { root.unmount(); });
   });
 
+  it("keeps Google vault location fixed and submits the supported global location", async () => {
+    mockSecretsApi.createProviderConfig.mockResolvedValueOnce({ displayName: "Google production" });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(<MemoryRouter><QueryClientProvider client={queryClient}><Secrets /></QueryClientProvider></MemoryRouter>);
+    });
+    await flushReact();
+    await flushReact();
+    await openAwsVaultDialog();
+    await act(async () => {
+      setSelectValue(document.getElementById("vault-provider") as HTMLSelectElement, "gcp_secret_manager");
+    });
+    await flushReact();
+
+    const locationLabel = [...document.querySelectorAll("label")].find((label) => label.textContent?.startsWith("Location"))!;
+    const location = document.getElementById(locationLabel.htmlFor) as HTMLInputElement;
+    expect(location).not.toBeNull();
+    expect(location.value).toBe("global");
+    expect(location.readOnly).toBe(true);
+    await act(async () => {
+      setInputValue(document.getElementById("vault-name") as HTMLInputElement, "Google production");
+      setInputValue(document.getElementById("provider-vault-project-id-or-number") as HTMLInputElement, "example-project");
+    });
+    const create = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Create vault")!;
+    expect(create.disabled).toBe(false);
+    await act(async () => { create.click(); });
+    await waitForReact(() => mockSecretsApi.createProviderConfig.mock.calls.length === 1);
+
+    expect(mockSecretsApi.createProviderConfig).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      provider: "gcp_secret_manager",
+      config: expect.objectContaining({ projectId: "example-project", location: "global" }),
+    }));
+  });
+
   it("uses the shared search/filter/tab affordances and keeps vault sections quiet", async () => {
     const root = createRoot(container);
     const queryClient = new QueryClient({
