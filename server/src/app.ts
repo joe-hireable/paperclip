@@ -24,6 +24,7 @@ import { cloudRoutes } from "./routes/cloud.js";
 import { companyRoutes } from "./routes/companies.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
 import { companySkillPolicyRoutes } from "./routes/company-skill-policy.js";
+import { executionBindingRoutes } from "./routes/execution-bindings.js";
 import { inboxAgentPolicyRoutes } from "./routes/inbox-agent-policy.js";
 import { builtInAgentRoutes } from "./routes/built-in-agents.js";
 import { folderRoutes } from "./routes/folders.js";
@@ -433,6 +434,7 @@ export async function createApp(
   api.use(folderRoutes(db));
   api.use(companySkillRoutes(db));
   api.use(companySkillPolicyRoutes(db));
+  api.use(executionBindingRoutes(db));
   api.use(inboxAgentPolicyRoutes(db));
   api.use(builtInAgentRoutes(db));
   api.use(summarySlotRoutes(db));

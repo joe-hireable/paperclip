@@ -1,3 +1,5 @@
+import { assertExecutionBindingConfig, ExecutionBindingError, executionBindingService } from "./execution-bindings.js";
+import type { ExecutionBindingSnapshot } from "@paperclipai/shared/execution-bindings";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
@@ -1260,6 +1262,7 @@ function assertLowTrustEnvConfigAllowed(envValue: unknown, source: string) {
 
 export async function resolveExecutionRunAdapterConfig(input: {
   companyId: string;
+  executionBinding?: ExecutionBindingSnapshot | null;
   agentId?: string | null;
   adapterType?: string | null;
   issueId?: string | null;
@@ -1579,6 +1582,9 @@ export async function resolveExecutionRunAdapterConfig(input: {
       ...input.trustedEnvProjection,
     };
     for (const key of input.trustedEnvSecretKeys ?? []) secretKeys.add(key);
+  }
+  if (input.executionBinding) {
+    assertExecutionBindingConfig(input.executionBinding, resolvedConfig, process.env);
   }
   // Pre-dispatch credential gate for codex_local: a managed Codex home with no
   // usable auth.json and an empty OPENAI_API_KEY would dispatch a run that
@@ -2496,6 +2502,7 @@ export function isConfigurationIncompleteFailedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
 ) {
   return (
+    run?.errorCode?.startsWith("execution_binding_") === true ||
     run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE ||
     run?.errorCode === "model_not_found"
   );
@@ -8370,6 +8377,7 @@ export function heartbeatService(
 
   const runLogStore = getRunLogStore();
   const traceStore = providerTraceStore(db);
+  const executionBindingsSvc = executionBindingService(db);
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
@@ -11865,6 +11873,7 @@ export function heartbeatService(
     runId: string,
     meta: { pid: number; processGroupId: number | null; startedAt: string },
   ) {
+    await executionBindingsSvc.recordProcess(runId, meta);
     return persistHeartbeatRunProcessMetadata(db, runId, meta);
   }
 
@@ -18032,6 +18041,8 @@ export function heartbeatService(
       }
     }
 
+    let executionBinding: ExecutionBindingSnapshot | null = null;
+    let boundAdapterStarted = false;
     activeRunExecutions.add(run.id);
     let runScratch: HeartbeatRunScratch | null = null;
     let nativeSessionResumeScheduled = false;
@@ -18056,7 +18067,7 @@ export function heartbeatService(
     let providerTraceFinalized = false;
 
     try {
-      const agent = await getAgent(run.agentId);
+      let agent = await getAgent(run.agentId);
       if (!agent) {
         await setRunStatus(runId, "failed", {
           error: "Agent not found",
@@ -18072,6 +18083,10 @@ export function heartbeatService(
         return;
       }
 
+      executionBinding = await executionBindingsSvc.acquire(run, agent);
+      if (executionBinding) {
+        agent = { ...agent, adapterType: executionBinding.binding.adapterType, adapterConfig: executionBinding.adapterConfig };
+      }
       const runtime = await ensureRuntimeState(agent);
       const context = parseObject(run.contextSnapshot);
       const providerTraceRequested =
@@ -18120,7 +18135,7 @@ export function heartbeatService(
           );
         }
       }
-      const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
+      const taskKey = executionBinding?.sessionKey ?? deriveTaskKeyWithHeartbeatFallback(context, null);
       const sessionCodec = getAdapterSessionCodec(agent.adapterType);
       const issueId = readNonEmptyString(context.issueId);
       let issueContext = issueId
@@ -18727,6 +18742,9 @@ export function heartbeatService(
           : selectedEnvironmentId
             ? await environmentsSvc.getById(selectedEnvironmentId)
             : null;
+      if (executionBinding && selectedEnvironmentForConfig?.driver !== "local") {
+        throw new ExecutionBindingError("execution_binding_target_denied", "This binding supports the local environment only");
+      }
       const sharedWorkspaceConcurrency = resolveSharedWorkspaceConcurrency({
         projectPolicy: projectExecutionWorkspacePolicy,
         issueSettings: issueExecutionWorkspaceSettings,
@@ -18813,8 +18831,9 @@ export function heartbeatService(
       });
       const mergedConfig = {
         ...workspaceManagedConfig,
-        ...(issueAssigneeOverrides?.adapterConfig ?? {}),
+        ...(executionBinding ? {} : (issueAssigneeOverrides?.adapterConfig ?? {})),
       };
+      if (executionBinding) assertExecutionBindingConfig(executionBinding, mergedConfig, process.env);
       const configSnapshot = buildExecutionWorkspaceConfigSnapshot(
         mergedConfig,
         selectedEnvironmentId,
@@ -18849,6 +18868,7 @@ export function heartbeatService(
       )("https://github.com/paperclipai/credential-probe.git");
       const { resolvedConfig, secretKeys, secretManifest } =
         await resolveExecutionRunAdapterConfig({
+          executionBinding,
           companyId: agent.companyId,
           agentId: agent.id,
           adapterType: agent.adapterType,
@@ -19731,6 +19751,9 @@ export function heartbeatService(
       const workspaceRealization = realizationResult.workspaceRealization;
       const executionTarget = realizationResult.executionTarget;
       const remoteExecution = realizationResult.remoteExecution;
+      if (executionBinding && remoteExecution) {
+        throw new ExecutionBindingError("execution_binding_target_denied", "Remote execution is not qualified for this account binding");
+      }
       const dispatchResolvedInteractionContinuationWithAtomicGate = async <T>(
         dispatch: (markDispatchStarted: () => void) => Promise<T>,
       ): Promise<
@@ -20455,6 +20478,9 @@ export function heartbeatService(
         });
         let nativeExecution: NativeExecutionInput | null = null;
         let nativeRunnerInstanceId: string | null = null;
+        if (executionBinding && nativeRuntimeResolution.kind === "native") {
+          throw new ExecutionBindingError("execution_binding_target_denied", "Native runner recovery is not qualified for this binding; use a direct local adapter");
+        }
         if (nativeRuntimeResolution.kind === "native") {
           if (!issueRef) {
             throw new Error("native_runtime_ineligible: issue is required");
@@ -21506,8 +21532,12 @@ export function heartbeatService(
             }
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
-                (markDispatchStarted) =>
-                  adapter.execute({
+                (markDispatchStarted) => {
+                  if (executionBinding) {
+                    assertExecutionBindingConfig(executionBinding, runtimeConfig, process.env);
+                    boundAdapterStarted = true;
+                  }
+                  return adapter.execute({
                     runId: run.id,
                     agent,
                     runtime: runtimeForAdapter,
@@ -21551,7 +21581,8 @@ export function heartbeatService(
                       });
                     },
                     authToken: authToken ?? undefined,
-                  }),
+                  });
+                },
               );
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
@@ -22436,6 +22467,7 @@ export function heartbeatService(
           })
           .catch(() => null);
         const failureErrorCode =
+          (err instanceof ExecutionBindingError ? err.code : null) ??
           workspaceValidationFailure?.code ??
           configurationIncompleteFailure?.code ??
           recordedResponsibleUserDenialCode ??
@@ -22631,6 +22663,7 @@ export function heartbeatService(
             (await getRun(runId).catch(() => null))?.errorCode,
           );
         const setupFailureErrorCode =
+          (outerErr instanceof ExecutionBindingError ? outerErr.code : null) ??
           workspaceValidationSetupFailure?.code ??
           configurationIncompleteSetupFailure?.code ??
           (unresolvedBaseRefSetupFailure
@@ -22889,6 +22922,14 @@ export function heartbeatService(
             );
           });
         }
+      }
+      if (executionBinding && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled) {
+        const child = runningProcesses.get(run.id)?.child;
+        await executionBindingsSvc.releaseAfterExecution({
+          companyId: run.companyId, runId: run.id, adapterStarted: boundAdapterStarted,
+          isProcessAlive, isProcessGroupAlive,
+          hasActiveChild: !!child && child.exitCode === null && child.signalCode === null,
+        }).catch((error) => logger.error({ error, runId: run.id }, "Account reservation retained: process reconciliation failed"));
       }
       activeRunExecutions.delete(run.id);
       if (

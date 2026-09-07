@@ -1,0 +1,1 @@
+ALTER TABLE "run_execution_bindings" ADD COLUMN "process_history" jsonb DEFAULT '[]'::jsonb NOT NULL;

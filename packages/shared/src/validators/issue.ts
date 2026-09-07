@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { executionBindingSelectionSchema } from "../execution-bindings.js";
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
   ISSUE_EXECUTION_MONITOR_CLEAR_REASONS,
@@ -221,6 +222,7 @@ export const issueExecutionWorkspaceSettingsSchema = z
 
 export const issueAssigneeAdapterOverridesSchema = z
   .object({
+    executionBinding: executionBindingSelectionSchema.optional(),
     adapterConfig: z.record(z.string(), z.unknown()).optional(),
     useProjectWorkspace: z.boolean().optional(),
   })

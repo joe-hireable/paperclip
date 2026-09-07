@@ -14,6 +14,7 @@ import {
   projects,
   goals,
   heartbeatRuns,
+  executionBindings,
   heartbeatRunEvents,
   costEvents,
   financeEvents,
@@ -33,6 +34,7 @@ import {
   routineRevisions,
   routines,
 } from "@paperclipai/db";
+import { removeReleasedRunExecutionBindings } from "./execution-bindings.js";
 import { notFound, unprocessable } from "../errors.js";
 import { isCloudManagedInstance } from "./cloud-instance.js";
 import {
@@ -526,7 +528,11 @@ export function companyService(db: Db) {
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })
           .from(heartbeatRuns)
-          .where(eq(heartbeatRuns.companyId, id));
+          .where(eq(heartbeatRuns.companyId, id))
+          .for("update");
+
+        await removeReleasedRunExecutionBindings(tx as unknown as Db, id, companyRunIds.map((run) => run.id));
+        await tx.delete(executionBindings).where(eq(executionBindings.companyId, id));
 
         await tx.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.companyId, id));
         if (companyRunIds.length > 0) {
