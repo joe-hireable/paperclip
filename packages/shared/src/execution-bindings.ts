@@ -7,6 +7,20 @@ export const executionDataClassSchema = z.enum([
   "synthetic",
   "private",
 ]);
+// Native CLI values, not a claim that every model supports every level.
+// Model/effort qualification belongs to the immutable binding's evidence.
+export const executionBindingReasoningEffortSchema = z.enum([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
+export type ExecutionBindingReasoningEffort = z.infer<
+  typeof executionBindingReasoningEffortSchema
+>;
 export const executionBindingSelectionSchema = z
   .object({
     bindingId: z.string().uuid(),
@@ -50,6 +64,13 @@ export const createExecutionBindingSchema = z
     // Capabilities are qualified for this exact model; a union across an account's
     // model catalogue would incorrectly grant stronger models' tools/modalities.
     models: z.array(z.string().trim().min(1).max(200)).length(1),
+    reasoningEffort: executionBindingReasoningEffortSchema.optional(),
+    // Operator-declared concrete CLI/runtime artefacts behind the launcher.
+    // Intelligent routing fingerprints these without running a command.
+    runtimeFilePaths: z.array(z.string().trim().min(1).max(1000).refine(
+      (value) => value.startsWith("/") || /^[A-Za-z]:[/\\]/.test(value),
+      "An absolute runtime artefact path is required",
+    )).min(1).max(8).optional(),
     capabilities: z.array(z.string().trim().min(1).max(100)).min(1).max(50),
     dataClasses: z.array(executionDataClassSchema).min(1),
     allowedAgentIds: z.array(z.string().uuid()).min(1).max(100),
@@ -57,7 +78,17 @@ export const createExecutionBindingSchema = z
     evidenceRefs: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
     verifiedUntil: z.string().datetime(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (binding) =>
+      binding.adapterType !== "claude_local" ||
+      binding.reasoningEffort === undefined ||
+      !["minimal", "ultra"].includes(binding.reasoningEffort),
+    {
+      path: ["reasoningEffort"],
+      message: "Claude Code effort must be low, medium, high, xhigh or max",
+    },
+  );
 
 export type ExecutionBindingDefinition = z.infer<
   typeof createExecutionBindingSchema
@@ -78,4 +109,12 @@ export interface ExecutionBindingSnapshot {
   adapterConfig: Record<string, unknown>;
   sessionKey: string;
   resolvedAt: string;
+  routingAuthorityDigest?: string;
+  routingReceipt?: {
+    contractId: string;
+    revision: number;
+    inputDigest: string;
+    requirementsDigest: string;
+    profileDigest: string;
+  };
 }

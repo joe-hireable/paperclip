@@ -123,6 +123,175 @@ describe("execution binding snapshot", () => {
     });
     expect(snapshot.adapterConfig.engine).toBe("cli");
   });
+  it.each([
+    ["codex_local", "ultra", "modelReasoningEffort"],
+    ["claude_local", "max", "effort"],
+  ] as const)(
+    "projects immutable %s effort without inheriting another model's settings",
+    (adapterType, reasoningEffort, nativeKey) => {
+      const qualified = { ...binding, adapterType, reasoningEffort };
+      const snapshot = resolveExecutionBindingSnapshot({
+        binding: qualified,
+        selection: selection(qualified.id),
+        agent: {
+          ...agent,
+          adapterType:
+            adapterType === "codex_local" ? "claude_local" : "codex_local",
+          adapterConfig: {
+            ...agent.adapterConfig,
+            effort: "low",
+            modelReasoningEffort: "medium",
+            reasoningEffort: "minimal",
+          },
+        },
+        taskKey: "issue",
+      });
+      expect(snapshot.binding.reasoningEffort).toBe(reasoningEffort);
+      expect(snapshot.adapterConfig[nativeKey]).toBe(reasoningEffort);
+      for (const key of ["effort", "modelReasoningEffort", "reasoningEffort"]) {
+        if (key !== nativeKey) {
+          expect(snapshot.adapterConfig).not.toHaveProperty(key);
+          expect(() =>
+            assertExecutionBindingConfig(snapshot, {
+              ...snapshot.adapterConfig,
+              [key]: reasoningEffort,
+            }),
+          ).toThrow(
+            expect.objectContaining({
+              code: "execution_binding_config_changed",
+            }),
+          );
+        }
+        for (const value of ["high", null, 1]) {
+          expect(() =>
+            assertExecutionBindingConfig(snapshot, {
+              ...snapshot.adapterConfig,
+              [key]: value,
+            }),
+          ).toThrow(
+            expect.objectContaining({
+              code: "execution_binding_config_changed",
+            }),
+          );
+        }
+      }
+      expect(() =>
+        assertExecutionBindingConfig(snapshot, {
+          ...snapshot.adapterConfig,
+          [nativeKey]: undefined,
+        }),
+      ).toThrow(
+        expect.objectContaining({ code: "execution_binding_config_changed" }),
+      );
+      expect(() =>
+        assertExecutionBindingConfig(snapshot, snapshot.adapterConfig),
+      ).not.toThrow();
+    },
+  );
+  it.each(["claude_local", "codex_local"] as const)(
+    "preserves legacy %s definitions without inheriting or injecting model effort",
+    (adapterType) => {
+      const snapshot = resolveExecutionBindingSnapshot({
+        binding: { ...binding, adapterType },
+        selection: selection(binding.id),
+        taskKey: "issue",
+        agent: {
+          ...agent,
+          adapterConfig: {
+            ...agent.adapterConfig,
+            effort: "max",
+            modelReasoningEffort: "ultra",
+            reasoningEffort: "high",
+          },
+        },
+      });
+      for (const key of ["effort", "modelReasoningEffort", "reasoningEffort"]) {
+        expect(snapshot.adapterConfig).not.toHaveProperty(key);
+        expect(() =>
+          assertExecutionBindingConfig(snapshot, {
+            ...snapshot.adapterConfig,
+            [key]: "high",
+          }),
+        ).toThrow(
+          expect.objectContaining({ code: "execution_binding_config_changed" }),
+        );
+      }
+      expect(() =>
+        assertExecutionBindingConfig(snapshot, snapshot.adapterConfig),
+      ).not.toThrow();
+    },
+  );
+  it("validates effort against each harness's accepted values, including persisted definitions", () => {
+    for (const adapterType of ["claude_local", "codex_local"] as const) {
+      for (const reasoningEffort of [
+        undefined,
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]) {
+        expect(
+          createExecutionBindingSchema.safeParse({
+            ...definition(agent.id),
+            adapterType,
+            reasoningEffort,
+          }).success,
+        ).toBe(true);
+      }
+      for (const reasoningEffort of ["minimal", "ultra"]) {
+        expect(
+          createExecutionBindingSchema.safeParse({
+            ...definition(agent.id),
+            adapterType,
+            reasoningEffort,
+          }).success,
+        ).toBe(adapterType === "codex_local");
+        if (adapterType === "claude_local")
+          expect(() =>
+            resolveExecutionBindingSnapshot({
+              binding: {
+                ...binding,
+                adapterType,
+                reasoningEffort,
+              } as ExecutionBinding,
+              selection: selection(binding.id),
+              agent,
+              taskKey: "issue",
+            }),
+          ).toThrow();
+      }
+      for (const reasoningEffort of [
+        "none",
+        "unlimited",
+        "HIGH",
+        " high ",
+        "",
+        null,
+        1,
+      ]) {
+        expect(
+          createExecutionBindingSchema.safeParse({
+            ...definition(agent.id),
+            adapterType,
+            reasoningEffort,
+          }).success,
+        ).toBe(false);
+        expect(() =>
+          resolveExecutionBindingSnapshot({
+            binding: {
+              ...binding,
+              adapterType,
+              reasoningEffort,
+            } as ExecutionBinding,
+            selection: selection(binding.id),
+            agent,
+            taskKey: "issue",
+          }),
+        ).toThrow();
+      }
+    }
+  });
   it("preserves an explicit permission choice across harnesses without applying Claude's permissive default", () => {
     const safe = resolveExecutionBindingSnapshot({
       binding,
@@ -515,6 +684,39 @@ describeDb("durable account reservation", () => {
       .from(runExecutionBindings)
       .where(eq(runExecutionBindings.companyId, f.companyId));
     expect(held).toHaveLength(1);
+  });
+  it("persists effort in separate immutable definitions and therefore separates native sessions", async () => {
+    const f = await fixture();
+    const low = await f.service.create(
+      f.companyId,
+      { ...definition(f.roles[0]!.id), reasoningEffort: "low" },
+      { actorType: "user", actorId: "test-board" },
+    );
+    const high = await f.service.create(
+      f.companyId,
+      { ...definition(f.roles[0]!.id), reasoningEffort: "high" },
+      { actorType: "user", actorId: "test-board" },
+    );
+    const persisted = await f.service.list(f.companyId);
+    expect(persisted.find((item) => item.id === low.id)?.reasoningEffort).toBe(
+      "low",
+    );
+    expect(persisted.find((item) => item.id === high.id)?.reasoningEffort).toBe(
+      "high",
+    );
+    expect(
+      persisted.find((item) => item.id === f.account.id)?.reasoningEffort,
+    ).toBeUndefined();
+    const snapshot = (item: ExecutionBinding) =>
+      resolveExecutionBindingSnapshot({
+        binding: item,
+        selection: selection(item.id),
+        agent: f.roles[0]!,
+        taskKey: "same-task",
+      });
+    expect(low.id).not.toBe(high.id);
+    expect(snapshot(low).sessionKey).not.toBe(snapshot(high).sessionKey);
+    expect(low.accountKey).toBe(high.accountKey);
   });
   it("retains reservation after cancellation status, elapsed time and a new server owner", async () => {
     const f = await fixture();

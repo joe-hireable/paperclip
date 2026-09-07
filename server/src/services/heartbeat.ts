@@ -1,5 +1,7 @@
 import { assertExecutionBindingConfig, ExecutionBindingError, executionBindingService } from "./execution-bindings.js";
 import type { ExecutionBindingSnapshot } from "@paperclipai/shared/execution-bindings";
+import { assertStaticIntelligentRoutingDelivery, IntelligentRoutingRuntimeError } from "./intelligent-routing-runtime.js";
+import { IntelligentRoutingContractError } from "./intelligent-routing-contracts.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
@@ -2498,11 +2500,31 @@ function isConfigurationIncompleteFailure(
   return error instanceof ConfigurationIncompleteFailure;
 }
 
+// Native adapters live outside the server package, so their bounded refusal
+// codes cannot use the server error classes. Preserve only these known codes.
+const STATIC_ROUTING_ADAPTER_FAILURE_CODES = new Set([
+  "intelligent_routing_delivery_mode_unsupported",
+  "intelligent_routing_dynamic_delivery_denied",
+  "intelligent_routing_remote_delivery_denied",
+  "intelligent_routing_instructions_unavailable",
+  "intelligent_routing_runtime_static_harness_unqualified",
+]);
+
+function staticRoutingAdapterFailureCode(error: unknown): string | null {
+  if (!(error instanceof Error) || !("code" in error)) return null;
+  const code = error.code;
+  return typeof code === "string" && STATIC_ROUTING_ADAPTER_FAILURE_CODES.has(code)
+    ? code
+    : null;
+}
+
 export function isConfigurationIncompleteFailedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
 ) {
   return (
     run?.errorCode?.startsWith("execution_binding_") === true ||
+    run?.errorCode?.startsWith("intelligent_routing_") === true ||
+    run?.errorCode?.startsWith("routing_contract_") === true ||
     run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE ||
     run?.errorCode === "model_not_found"
   );
@@ -18919,7 +18941,7 @@ export function heartbeatService(
       const runtimeSkillPreference = readPaperclipSkillSyncPreference(
         effectiveResolvedConfig,
       );
-      const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(
+      const runtimeSkillEntries = executionBinding?.routingReceipt ? [] : await companySkills.listRuntimeSkillEntries(
         agent.companyId,
         {
           versionSelections: skillVersionSelectionMap(
@@ -19755,7 +19777,7 @@ export function heartbeatService(
         throw new ExecutionBindingError("execution_binding_target_denied", "Remote execution is not qualified for this account binding");
       }
       const dispatchResolvedInteractionContinuationWithAtomicGate = async <T>(
-        dispatch: (markDispatchStarted: () => void) => Promise<T>,
+        dispatch: (markDispatchStarted: () => void, authorityTransaction?: Db) => Promise<T>,
       ): Promise<
         { dispatched: true; resultPromise: Promise<T> } | { dispatched: false }
       > => {
@@ -19824,7 +19846,7 @@ export function heartbeatService(
           // preparation and release it only once the adapter reports an
           // actual process spawn. If preparation fails or returns without a
           // spawn, settling the adapter promise also releases the gate.
-          const resultPromise = dispatch(markDispatchStarted);
+          const resultPromise = dispatch(markDispatchStarted, tx as unknown as Db);
           void resultPromise.then(markDispatchStarted, markDispatchStarted);
           await dispatchStartedPromise;
           return { dispatched: true as const, resultPromise };
@@ -21484,13 +21506,13 @@ export function heartbeatService(
                   }
                 : {}),
             };
-            const runtimeTools = createAdapterRuntimeToolAccess({
+            const runtimeTools = executionBinding?.routingReceipt ? undefined : createAdapterRuntimeToolAccess({
               agentId: agent.id,
               companyId: agent.companyId,
               runId: run.id,
               responsibleUserId: run.responsibleUserId,
             });
-            if (!runtimeTools) {
+            if (!runtimeTools && !executionBinding?.routingReceipt) {
               logger.warn(
                 {
                   companyId: agent.companyId,
@@ -21500,7 +21522,7 @@ export function heartbeatService(
                 "runtime connection tools could not be delivered",
               );
             }
-            const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
+            const runtimeMcpServers = executionBinding?.routingReceipt ? [] : await buildPaperclipRuntimeMcpServers({
               db,
               agent,
               runId: run.id,
@@ -21515,11 +21537,11 @@ export function heartbeatService(
                 connectionId: "paperclip-runtime-tools",
               });
             }
-            const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);
+            const runtimeMcp = createAdapterRuntimeMcpAccess(executionBinding?.routingReceipt ? [] : runtimeMcpServers);
             if (runtimeTools && runtimeToolDelivery === "invocation_context") {
               adapterContext.paperclipRuntimeTools = runtimeTools;
             }
-            const managedMcpConfig = await createManagedMcpRunConfig({
+            const managedMcpConfig = executionBinding?.routingReceipt ? null : await createManagedMcpRunConfig({
               db,
               agent,
               runId: run.id,
@@ -21532,9 +21554,22 @@ export function heartbeatService(
             }
             const guardedDispatch =
               await dispatchResolvedInteractionContinuationWithAtomicGate(
-                (markDispatchStarted) => {
+                async (markDispatchStarted, authorityTransaction) => {
                   if (executionBinding) {
                     assertExecutionBindingConfig(executionBinding, runtimeConfig, process.env);
+                    if (executionBinding.routingReceipt) {
+                      await assertStaticIntelligentRoutingDelivery({
+                        adapterType: executionBinding.binding.adapterType,
+                        qualifiedCwd: executionBinding.adapterConfig.cwd as string,
+                        config: runtimeConfig,
+                        context: adapterContext,
+                        executionTarget,
+                        runtimeToolsPresent: runtimeTools != null,
+                        runtimeMcpServerCount: 0,
+                        managedMcpPresent: managedMcpConfig !== null,
+                      });
+                    }
+                    await executionBindingService(db).assertBeforeLaunch(run, agent, executionBinding, runtimeConfig, authorityTransaction);
                     boundAdapterStarted = true;
                   }
                   return adapter.execute({
@@ -22467,7 +22502,7 @@ export function heartbeatService(
           })
           .catch(() => null);
         const failureErrorCode =
-          (err instanceof ExecutionBindingError ? err.code : null) ??
+          (err instanceof ExecutionBindingError || err instanceof IntelligentRoutingRuntimeError || err instanceof IntelligentRoutingContractError ? err.code : staticRoutingAdapterFailureCode(err)) ??
           workspaceValidationFailure?.code ??
           configurationIncompleteFailure?.code ??
           recordedResponsibleUserDenialCode ??
@@ -22576,7 +22611,7 @@ export function heartbeatService(
             // exhaustion. Once its durable coordinator has classified a
             // terminal failure, generic issue recovery must not create a
             // replacement retryOfRunId chain for the same provider work.
-            suppressImmediateRecovery: nativeTerminalFailureCode !== null,
+            suppressImmediateRecovery: nativeTerminalFailureCode !== null || isConfigurationIncompleteFailedRun(livenessRun),
           });
           await handleIssueReviewPathDisposition(livenessRun);
 
@@ -22663,7 +22698,7 @@ export function heartbeatService(
             (await getRun(runId).catch(() => null))?.errorCode,
           );
         const setupFailureErrorCode =
-          (outerErr instanceof ExecutionBindingError ? outerErr.code : null) ??
+          (outerErr instanceof ExecutionBindingError || outerErr instanceof IntelligentRoutingRuntimeError || outerErr instanceof IntelligentRoutingContractError ? outerErr.code : staticRoutingAdapterFailureCode(outerErr)) ??
           workspaceValidationSetupFailure?.code ??
           configurationIncompleteSetupFailure?.code ??
           (unresolvedBaseRefSetupFailure
@@ -22776,7 +22811,7 @@ export function heartbeatService(
               );
             });
           }
-          await releaseIssueExecutionAndPromote(livenessRun).catch(
+          await releaseIssueExecutionAndPromote(livenessRun, { suppressImmediateRecovery: isConfigurationIncompleteFailedRun(livenessRun) }).catch(
             (releaseError) => {
               logger.error(
                 { err: releaseError, runId },

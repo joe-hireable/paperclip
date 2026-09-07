@@ -14,7 +14,7 @@ export type ExecutionBindingRequirements = z.infer<
   typeof executionBindingRequirementsSchema
 >;
 
-const candidateSchema = createExecutionBindingSchema.extend({
+const candidateSchema = createExecutionBindingSchema.safeExtend({
   id: z.string().uuid(),
   companyId: z.string().uuid(),
   enabled: z.boolean(),
