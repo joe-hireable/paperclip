@@ -49,10 +49,11 @@ function harness(state = initial()) {
     namespace: "plugin_shared_operations_test", execute,
     async query<T>(statement: string, params?: unknown[]) { return await query(statement, params) as T[]; },
   };
-  const ctx = { db, issues: { get: getIssue } } as unknown as PluginContext;
+  const logActivity = vi.fn(async (_entry: unknown) => {});
+  const ctx = { db, issues: { get: getIssue }, activity: { log: logActivity } } as unknown as PluginContext;
   const operations = createOperations(ctx);
   return {
-    query, execute, getIssue,
+    query, execute, getIssue, logActivity,
     changeTask(next: TaskHead | null) { currentHead = next; },
     loseConditionalWrite() { updateCount = 0; },
     run(command: Command, actor = board, expectedRevision = 3) {
@@ -62,6 +63,37 @@ function harness(state = initial()) {
 }
 
 describe("operations command integration", () => {
+  it("logs committed operations with the trusted actor and revision without copying policy contents", async () => {
+    const h = harness(emptyState());
+    await h.run(publish);
+    expect(h.logActivity).toHaveBeenCalledExactlyOnceWith({
+      companyId: company,
+      message: "Shared operations: policy.publish",
+      entityType: "shared_operations",
+      entityId: "policy-1",
+      metadata: { type: "shared_operations.command_committed", commandType: "policy.publish", revision: 4, actor: board },
+    });
+    expect(h.execute.mock.invocationCallOrder[1]).toBeLessThan(h.logActivity.mock.invocationCallOrder[0]);
+    expect(JSON.stringify(h.logActivity.mock.calls)).not.toContain("Verify task context");
+  });
+
+  it("does not claim a committed activity when the conditional write loses", async () => {
+    const h = harness();
+    h.loseConditionalWrite();
+    await expect(h.run(snapshot)).rejects.toMatchObject({ code: "revision_conflict" });
+    expect(h.logActivity).not.toHaveBeenCalled();
+  });
+
+  it("reports the committed revision when activity logging fails without hiding the partial outcome", async () => {
+    const h = harness(emptyState());
+    h.logActivity.mockRejectedValueOnce(new Error("provider response must not escape"));
+    await expect(h.run(publish)).rejects.toMatchObject({
+      code: "activity_log_failed", status: 503,
+      message: "Operation saved at revision 4, but the host activity log could not be confirmed. Refresh the state before any further action; do not resubmit the operation.",
+    });
+    expect(h.execute).toHaveBeenCalledTimes(2);
+  });
+
   it("propagates domain permission failures without writing company state", async () => {
     const h = harness(emptyState());
     await expect(h.run(publish, receiver)).rejects.toMatchObject({ code: "BOARD_REQUIRED", status: 403 });

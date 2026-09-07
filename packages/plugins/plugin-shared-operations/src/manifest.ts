@@ -13,7 +13,7 @@ const manifest: PaperclipPluginManifestV1 = {
   capabilities: [
     "api.routes.register", "database.namespace.migrate", "database.namespace.read",
     "database.namespace.write", "issues.read", "agents.read", "ui.page.register",
-    "ui.sidebar.register",
+    "ui.sidebar.register", "activity.log.write",
   ],
   entrypoints: { worker: "./dist/worker.js", ui: "./dist/ui" },
   database: { namespaceSlug: "shared_operations", migrationsDir: "migrations", coreReadTables: ["companies", "issues"] },

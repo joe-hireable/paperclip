@@ -55,7 +55,22 @@ export function createOperations(ctx: PluginContext) {
         }
       }
       const next = applyCommand(current.state, command, actor, new Date().toISOString());
-      return store.save(id, params.expectedRevision, next, task);
+      const saved = await store.save(id, params.expectedRevision, next, task);
+      const event = next.events[next.events.length - 1];
+      try {
+        await ctx.activity.log({
+          companyId: id,
+          message: `Shared operations: ${event.type}`,
+          entityType: "shared_operations",
+          entityId: event.subjectId,
+          metadata: { type: "shared_operations.command_committed", commandType: event.type, revision: saved.revision, actor: event.actor },
+        });
+      } catch {
+        // The SDK audit call is separate from the state transaction. The saved
+        // domain event remains authoritative if its host log cannot be confirmed.
+        throw new DomainError("activity_log_failed", `Operation saved at revision ${saved.revision}, but the host activity log could not be confirmed. Refresh the state before any further action; do not resubmit the operation.`, 503);
+      }
+      return saved;
     },
   };
 }

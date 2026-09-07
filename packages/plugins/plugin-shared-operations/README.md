@@ -145,6 +145,14 @@ large-scale memory archive. A production-scale deployment needs an export and
 history migration strategy before this limit is reached. Policy bundles and
 context snapshots are each capped at 32 KiB.
 
+Committed commands also write to the host company activity log with their type,
+subject, committed revision and authenticated actor. Policy and memory contents
+are not copied into the host log. The SDK activity call is separate from the
+state transaction. If it fails, the API returns `503 activity_log_failed` and
+names the saved revision. Refresh the state; do not resubmit that command. The
+complete domain event remains in the company document for audit reconciliation.
+This first version does not automatically retry unconfirmed host log writes.
+
 The plugin does not implement subscription quota discovery, automatic account
 rotation, model routing, training-data collection, model training, or a GrokBot
 group transport. Those are separate integrations, not implied by this plugin's
