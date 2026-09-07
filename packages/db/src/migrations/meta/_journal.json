@@ -1681,6 +1681,13 @@
       "when": 1788788461510,
       "tag": "0241_hesitant_blur",
       "breakpoints": true
+    },
+    {
+      "idx": 242,
+      "version": "7",
+      "when": 1788805344398,
+      "tag": "0242_mysterious_squadron_sinister",
+      "breakpoints": true
     }
   ]
 }

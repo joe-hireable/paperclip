@@ -158,4 +158,15 @@ describe("codex_local ACP startup fallback", () => {
 
     expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
   });
+
+  it.each(["cli", "acp", undefined])("refuses unqualified static routing before the %s engine or profile preparation", async (engine) => {
+    const ctx = buildContext({ engine, intelligentRoutingDeliveryMode: "static_native" });
+    await expect(execute(ctx as never)).rejects.toMatchObject({
+      code: "intelligent_routing_runtime_static_harness_unqualified",
+    });
+    expect(executeCodexAcp).not.toHaveBeenCalled();
+    expect(prepareCodexRuntimeConfig).not.toHaveBeenCalled();
+    expect(readPaperclipRuntimeSkillEntries).not.toHaveBeenCalled();
+    expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
+  });
 });

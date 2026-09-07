@@ -19,6 +19,13 @@ import {
 } from "@paperclipai/shared/execution-bindings";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { persistActivity, type LogActivityInput } from "./activity-log.js";
+import {
+  assertIntelligentRoutingContract,
+  loadLatestIntelligentRoutingContract,
+  loadRoutingDocumentRevisionDigests,
+} from "./intelligent-routing-contracts.js";
+import { intelligentRoutingDigest } from "./intelligent-routing-policy.js";
+import { collectIntelligentRoutingRuntimeFingerprint } from "./intelligent-routing-runtime.js";
 
 type Agent = typeof agents.$inferSelect;
 type Run = typeof heartbeatRuns.$inferSelect;
@@ -88,17 +95,26 @@ export function assertExecutionBindingConfig(
     snapshot.binding.adapterType === "claude_local"
       ? "dangerouslySkipPermissions"
       : "dangerouslyBypassApprovalsAndSandbox";
+  const effortKey =
+    snapshot.binding.adapterType === "codex_local"
+      ? "modelReasoningEffort"
+      : "effort";
   if (
     config.command !== snapshot.binding.command ||
     config.model !== snapshot.selection.model ||
     config.engine !== "cli" ||
+    config.intelligentRoutingDeliveryMode !== snapshot.adapterConfig.intelligentRoutingDeliveryMode ||
     env[homeKey] !== snapshot.binding.nativeProfileHome ||
     env[otherHomeKey] != null ||
-    config[bypassKey] !== snapshot.adapterConfig[bypassKey]
+    config[bypassKey] !== snapshot.adapterConfig[bypassKey] ||
+    config[effortKey] !== snapshot.binding.reasoningEffort ||
+    ["effort", "modelReasoningEffort", "reasoningEffort"].some(
+      (key) => key !== effortKey && config[key] !== undefined,
+    )
   ) {
     deny(
       "execution_binding_config_changed",
-      "Execution configuration no longer matches the reserved account, harness and model",
+      "Execution configuration no longer matches the reserved account, harness, model and reasoning effort",
     );
   }
   for (const key of [
@@ -147,6 +163,7 @@ export function resolveExecutionBindingSnapshot(input: {
   agent: Agent;
   taskKey: string;
   now?: Date;
+  deliveryMode?: "static_native";
 }): ExecutionBindingSnapshot {
   const { binding, selection, agent } = input;
   const now = input.now ?? new Date();
@@ -211,6 +228,7 @@ export function resolveExecutionBindingSnapshot(input: {
   }
   const adapterConfig: Record<string, unknown> = {
     engine: "cli",
+    ...(input.deliveryMode ? { intelligentRoutingDeliveryMode: input.deliveryMode } : {}),
     env: {
       [binding.adapterType === "codex_local"
         ? "CODEX_HOME"
@@ -241,6 +259,13 @@ export function resolveExecutionBindingSnapshot(input: {
   // from the role's default harness must never leak into another account.
   adapterConfig.command = binding.command;
   adapterConfig.model = selection.model;
+  // Omitted legacy effort uses the native default. Never carry a role's effort
+  // or Codex's legacy alias into a different model/account/harness binding.
+  if (binding.reasoningEffort !== undefined) {
+    adapterConfig[
+      binding.adapterType === "codex_local" ? "modelReasoningEffort" : "effort"
+    ] = binding.reasoningEffort;
+  }
   // The harnesses have different defaults. Never turn absent/false Codex
   // bypass into Claude's implicit true when a role changes execution harness.
   const sourceBypass =
@@ -279,7 +304,10 @@ export function resolveExecutionBindingSnapshot(input: {
   };
 }
 
-export function executionBindingService(db: Db) {
+export function executionBindingService(db: Db, options: {
+  runtimeFingerprint?: typeof collectIntelligentRoutingRuntimeFingerprint;
+} = {}) {
+  const runtimeFingerprint = options.runtimeFingerprint ?? collectIntelligentRoutingRuntimeFingerprint;
   // Boot-local ownership is a capability. A restarted server may inspect an
   // existing reservation but cannot reclaim it by run ID or elapsed time.
   const ownerId = `${process.pid}:${randomUUID()}`;
@@ -438,9 +466,13 @@ export function executionBindingService(db: Db) {
         .from(issues)
         .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
         .for("update");
+      if (!issue) deny("execution_binding_scope", "The task is unavailable in this company");
       const overrides = object(issue?.assigneeAdapterOverrides);
+      const routingContract = await loadLatestIntelligentRoutingContract(
+        tx as unknown as Db, run.companyId, issueId,
+      );
       if (!Object.hasOwn(overrides, "executionBinding")) {
-        if (bindingRequired)
+        if (bindingRequired || routingContract)
           deny(
             "execution_binding_required",
             "This role requires a qualified task execution binding",
@@ -496,7 +528,24 @@ export function executionBindingService(db: Db) {
         selection,
         agent,
         taskKey: issueId,
+        ...(routingContract ? { deliveryMode: "static_native" as const } : {}),
       });
+      if (routingContract) {
+        const [currentAgent] = await tx.select().from(agents).where(and(
+          eq(agents.id, agent.id), eq(agents.companyId, run.companyId),
+        ));
+        if (!currentAgent || intelligentRoutingDigest({ config: currentAgent.adapterConfig, permissions: currentAgent.permissions }) !==
+          intelligentRoutingDigest({ config: agent.adapterConfig, permissions: agent.permissions })) {
+          deny("intelligent_routing_role_changed", "Role configuration changed after this run was prepared");
+        }
+        snapshot.routingReceipt = assertIntelligentRoutingContract({
+          contract: routingContract, issue: issue!, agent: currentAgent,
+          binding: bindingView(row), snapshot, now: new Date(),
+          documentRevisionDigests: await loadRoutingDocumentRevisionDigests(tx as unknown as Db, run.companyId, issueId),
+          runtimeFingerprint: await runtimeFingerprint({ adapterConfig: snapshot.adapterConfig, binding: snapshot.binding, runtimeFilePaths: snapshot.binding.runtimeFilePaths }),
+        });
+        snapshot.routingAuthorityDigest = intelligentRoutingDigest({ config: currentAgent.adapterConfig, permissions: currentAgent.permissions });
+      }
       // This lock serialises different bindings/roles backed by the same native
       // account. The partial unique index is the second database guard.
       await tx.execute(
@@ -718,11 +767,57 @@ export function executionBindingService(db: Db) {
       return { released: true, reason: "process_tree_and_controller_gone" };
     });
   }
+  async function assertBeforeLaunch(run: Run, agent: Agent, snapshot: ExecutionBindingSnapshot, runtimeConfig?: Record<string, unknown>, authorityTransaction?: Db) {
+    const issueId = object(run.contextSnapshot).issueId;
+    if (typeof issueId !== "string") return;
+    const check = async (tx: Db) => {
+      const [issue] = await tx.select().from(issues).where(and(
+        eq(issues.id, issueId), eq(issues.companyId, run.companyId),
+      )).for("update");
+      const contract = await loadLatestIntelligentRoutingContract(tx as unknown as Db, run.companyId, issueId);
+      if (!contract && !snapshot.routingReceipt) return;
+      if (!contract || !snapshot.routingReceipt || !issue) {
+        deny("intelligent_routing_contract_changed", "The routing contract changed after account reservation");
+      }
+      const [currentAgent] = await tx.select().from(agents).where(and(
+        eq(agents.id, agent.id), eq(agents.companyId, run.companyId),
+      ));
+      const [row] = await tx.select().from(executionBindings).where(and(
+        eq(executionBindings.id, snapshot.binding.id), eq(executionBindings.companyId, run.companyId),
+      ));
+      if (!currentAgent || !row || intelligentRoutingDigest({ config: currentAgent.adapterConfig, permissions: currentAgent.permissions }) !==
+        snapshot.routingAuthorityDigest) {
+        deny("intelligent_routing_role_changed", "Role configuration changed before native dispatch");
+      }
+      const currentSnapshot = resolveExecutionBindingSnapshot({
+        binding: bindingView(row), selection: snapshot.selection, agent: currentAgent, taskKey: issueId,
+        deliveryMode: "static_native",
+      });
+      if (intelligentRoutingDigest(currentSnapshot.adapterConfig) !== intelligentRoutingDigest(snapshot.adapterConfig)) {
+        deny("intelligent_routing_configuration_changed", "The qualified execution configuration changed");
+      }
+      if (runtimeConfig && ROLE_CONFIG_KEYS.some((key) =>
+        intelligentRoutingDigest(runtimeConfig[key] ?? null) !== intelligentRoutingDigest(snapshot.adapterConfig[key] ?? null))) {
+        deny("intelligent_routing_configuration_changed", "Runtime instructions, workspace or tool permissions changed from the qualified configuration");
+      }
+      const receipt = assertIntelligentRoutingContract({
+        contract, issue, agent: currentAgent, binding: bindingView(row), snapshot: currentSnapshot, now: new Date(),
+        documentRevisionDigests: await loadRoutingDocumentRevisionDigests(tx as unknown as Db, run.companyId, issueId),
+        runtimeFingerprint: await runtimeFingerprint({ adapterConfig: currentSnapshot.adapterConfig, binding: currentSnapshot.binding, runtimeFilePaths: currentSnapshot.binding.runtimeFilePaths }),
+      });
+      if (intelligentRoutingDigest(receipt) !== intelligentRoutingDigest(snapshot.routingReceipt)) {
+        deny("intelligent_routing_contract_changed", "The routing decision changed after account reservation");
+      }
+    };
+    if (authorityTransaction) await check(authorityTransaction);
+    else await db.transaction(async (tx) => check(tx as unknown as Db));
+  }
   return {
     list,
     create,
     disable,
     acquire,
+    assertBeforeLaunch,
     getRunBinding,
     recordProcess,
     releaseAfterExecution,
