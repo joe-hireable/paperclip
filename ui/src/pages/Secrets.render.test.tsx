@@ -397,6 +397,32 @@ describe("Secrets page layout", () => {
     vi.clearAllMocks();
   });
 
+  it("offers ready Google vaults with metadata-only fields and explains external version pinning", async () => {
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(<MemoryRouter><QueryClientProvider client={queryClient}><Secrets /></QueryClientProvider></MemoryRouter>);
+    });
+    await flushReact();
+    await flushReact();
+    await openAwsVaultDialog();
+    await act(async () => {
+      setSelectValue(document.getElementById("vault-provider") as HTMLSelectElement, "gcp_secret_manager");
+    });
+    await flushReact();
+
+    const status = document.getElementById("vault-status") as HTMLSelectElement;
+    expect(status.value).toBe("ready");
+    expect(status.querySelector<HTMLOptionElement>('option[value="ready"]')?.disabled).toBe(false);
+    const dialog = status.closest('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("Project ID or number");
+    expect(dialog.textContent).toContain("pins the selected version");
+    expect(dialog.textContent).not.toContain("Namespace");
+    expect(dialog.querySelector('input[type="password"]')).toBeNull();
+    expect([...dialog.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Create vault")?.disabled).toBe(true);
+    await act(async () => { root.unmount(); });
+  });
+
   it("uses the shared search/filter/tab affordances and keeps vault sections quiet", async () => {
     const root = createRoot(container);
     const queryClient = new QueryClient({
