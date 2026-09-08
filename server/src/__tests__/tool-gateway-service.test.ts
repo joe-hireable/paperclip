@@ -1118,6 +1118,67 @@ describeEmbeddedPostgres("tool gateway service", () => {
     expect((result.result as { content?: string }).content).toContain(
       "enroll the signed-in Workspace account and this OAuth client's Google Cloud project",
     );
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, result.invocationId));
+    expect.soft(invocation).toMatchObject({ status: "failed", errorCode: "mcp_tool_error" });
+    expect.soft(JSON.stringify(invocation.resultSummary)).toContain("The caller does not have permission");
+    const [responsiveConnection] = await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id));
+    expect(responsiveConnection.healthStatus).toBe("ok");
+    const events = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, result.invocationId));
+    expect.soft(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "call_failed", outcome: "failure", decision: "allow", reasonCode: "mcp_tool_error" }),
+    ]));
+    expect.soft(events.filter((event) => event.eventType === "call_completed")).toEqual([]);
+  });
+
+  it("records an approved MCP tool error and replays its failed outcome without executing again", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const { connection, catalogEntry } = await createRemoteMcpToolFixture(db, company.id);
+    await db.update(toolCatalogEntries).set({ riskLevel: "write", isReadOnly: false, isWrite: true })
+      .where(eq(toolCatalogEntries.id, catalogEntry.id));
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review remote writes",
+      policyType: "require_approval",
+      selectors: { connectionId: connection.id },
+    });
+    const remoteHttpRequest = vi.fn(async (_url: string | URL, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { id: string };
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0", id: body.id,
+        result: { isError: true, content: [{ type: "text", text: "Requested update was denied" }] },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const gateway = createTestToolGatewayService(db, { remoteHttpRequest });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const tool = (await gateway.listToolsForSession(session.token))
+      .find((candidate) => candidate.providerType === "mcp_remote_http")!;
+    const call = { sessionToken: session.token, tool: tool.name, parameters: {}, idempotencyKey: "approved-failed-call" };
+    await expect(gateway.executeTool(call)).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [action] = await db.select().from(toolActionRequests);
+    const approved = await gateway.approveActionRequest({
+      companyId: company.id, actionRequestId: action.id, actor: { userId: "board-user" },
+    });
+    expect.soft(approved.status).toBe("failed");
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, action.invocationId!));
+    expect.soft(invocation).toMatchObject({
+      status: "failed", errorCode: "mcp_tool_error", idempotencyKey: "approved-failed-call",
+    });
+    expect.soft(JSON.stringify(invocation.resultSummary)).toContain("Requested update was denied");
+    const replay = await gateway.executeTool(call);
+    expect.soft(replay).toMatchObject({
+      status: "replayed", invocationId: invocation.id,
+      result: { content: "Requested update was denied", data: { isError: true } },
+    });
+    expect(remoteHttpRequest).toHaveBeenCalledOnce();
+    expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id))).toHaveLength(1);
+    expect(await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, company.id))).toHaveLength(1);
+    const [responsiveConnection] = await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id));
+    expect(responsiveConnection.healthStatus).toBe("ok");
+    const events = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, invocation.id));
+    expect.soft(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "call_failed", outcome: "failure", decision: "allow", reasonCode: "mcp_tool_error" }),
+    ]));
+    expect.soft(events.filter((event) => event.eventType === "call_completed")).toEqual([]);
   });
 
   it("injects Vercel tokens at dispatch and refreshes exactly once after an upstream 401", async () => {
@@ -1491,6 +1552,31 @@ describeEmbeddedPostgres("tool gateway service", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("does not classify a plugin error field as an MCP tool error", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const gateway = createTestToolGatewayService(db, {
+      pluginToolDispatcher: {
+        ...fakePluginDispatcher(),
+        listToolsForAgent: () => [{
+          name: "fixture:read_status", displayName: "Read status", description: "Read domain status.",
+          parametersSchema: { type: "object" }, pluginId: "fixture-plugin",
+        }],
+        executeTool: async () => ({
+          pluginId: "fixture-plugin", toolName: "read_status",
+          result: { content: "Domain state", error: "Ordinary plugin payload", data: { isError: true } },
+        }),
+      },
+    });
+    await db.insert(toolPolicies).values({
+      companyId: company.id, name: "Allow plugin read", policyType: "allow",
+      selectors: { toolName: "fixture:read_status" },
+    });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    await gateway.executeTool({ sessionToken: session.token, tool: "fixture:read_status", parameters: {} });
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id));
+    expect(invocation).toMatchObject({ status: "succeeded", errorCode: null });
   });
 
   it("blocks malicious plugin tool results before they reach the agent", async () => {

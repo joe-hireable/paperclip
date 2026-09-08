@@ -2549,6 +2549,69 @@ describeEmbeddedPostgres("tool access service", () => {
     ]));
   });
 
+  it.each([false, true])("records Test tab MCP tool errors with approval=%s", async (requiresApproval) => {
+    const company = await createCompany(db);
+    const userId = `tool-tester-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, ["tools:use"]);
+    const agent = await createAgent(db, company.id);
+    const { connection } = await createRemoteToolFixture(db, company.id);
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: `Test error policy ${randomUUID()}`,
+      policyType: requiresApproval ? "require_approval" : "allow",
+      priority: 100,
+      selectors: { connectionId: connection.id },
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(mcpHttpResponse({
+      jsonrpc: "2.0", id: "paperclip-tool-test",
+      result: { isError: true, content: [{ type: "text", text: "Recipient was rejected" }] },
+    }));
+    const gateway = createToolGatewayService(db, { toolActionSigningSecret: "test-secret" });
+    const app = createRouteApp(db, boardSessionActor(company.id, "operator", userId), gateway);
+    const created = await request(app)
+      .post(`/api/tool-connections/${connection.id}/test-calls`)
+      .send({ agentId: agent.id, toolName: "send_email", parameters: { to: "a@example.com", body: "hi" } })
+      .expect(200);
+    let result = created.body;
+    if (requiresApproval) {
+      expect(fetchMock).not.toHaveBeenCalled();
+      await gateway.approveActionRequest({
+        companyId: company.id, actionRequestId: created.body.actionRequestId, actor: { userId },
+      });
+      await vi.waitFor(async () => {
+        const [action] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, created.body.actionRequestId));
+        expect(["executed", "failed"]).toContain(action.status);
+      }, { timeout: 2_000, interval: 10 });
+      const done = await request(app)
+        .get(`/api/tool-connections/${connection.id}/test-calls/${created.body.actionRequestId}`)
+        .expect(200);
+      result = done.body;
+      expect.soft(result.phase).toBe("done");
+      const [action] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, created.body.actionRequestId));
+      expect.soft(action.status).toBe("failed");
+    }
+    expect.soft(result).toMatchObject({
+      error: { message: expect.stringContaining("Recipient was rejected"), reasonCode: "mcp_tool_error" },
+    });
+    expect.soft(result.result).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id));
+    expect.soft(invocation).toMatchObject({
+      actorType: "user", actorId: userId, agentId: agent.id, runId: null,
+      status: "failed", errorCode: "mcp_tool_error",
+    });
+    expect.soft(JSON.stringify(invocation.resultSummary)).toContain("Recipient was rejected");
+    const [responsiveConnection] = await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id));
+    expect(responsiveConnection.healthStatus).toBe("ok");
+    const events = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, invocation.id));
+    expect.soft(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "call_failed", outcome: "failure", decision: "allow", reasonCode: "mcp_tool_error" }),
+    ]));
+    const audits = await db.select().from(toolAccessAuditEvents).where(eq(toolAccessAuditEvents.companyId, company.id));
+    expect.soft(audits).toEqual(expect.arrayContaining([expect.objectContaining({ action: "call_failed" })]));
+    expect.soft(audits.filter((audit) => audit.action === "call_completed")).toEqual([]);
+  });
+
   it("turns ask-first test calls into real pending action requests", async () => {
     const company = await createCompany(db);
     const userId = `tool-tester-${randomUUID()}`;

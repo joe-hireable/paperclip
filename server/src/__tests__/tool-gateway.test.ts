@@ -817,6 +817,119 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it.each(["derived", "explicit"] as const)("preserves named MCP tool error outcomes on %s-key replay", async (keyKind) => {
+    const company = await createCompany(db);
+    const diagnostic = keyKind === "explicit" ? `Write rejected. ${"Diagnostic detail. ".repeat(400)}` : "Write rejected";
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({
+      body: {
+        jsonrpc: "2.0", id: body?.id,
+        result: {
+          isError: true,
+          content: [{ type: "text", text: diagnostic }],
+          structuredContent: { reason: "insufficient_permission", apiKey: "synthetic-output-secret" },
+        },
+      },
+    }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "update_note", riskLevel: "write",
+      });
+      const toolName = expectedConnectedToolName({
+        applicationKey: application.applicationKey, connectionId: connection.id, toolName: catalogEntry.toolName,
+      });
+      const [profile] = await db.insert(toolProfiles).values({
+        companyId: company.id, profileKey: `gateway-errors-${randomUUID()}`,
+        name: "Gateway error fixture", defaultAction: "deny",
+      }).returning();
+      await db.insert(toolProfileEntries).values({
+        companyId: company.id, profileId: profile!.id, selectorType: "catalog_entry", effect: "include",
+        applicationId: application.id, connectionId: connection.id, catalogEntryId: catalogEntry.id,
+      });
+      const gateway = createTestToolGatewayService(db);
+      const named = await gateway.createNamedGateway({
+        companyId: company.id, body: { name: "Error fixture", profileId: profile!.id },
+      });
+      const token = await gateway.createNamedGatewayToken({
+        companyId: company.id, gatewayId: named.id, body: { name: "Error fixture", allowedActions: ["tools/call"] },
+      });
+      const app = createGatewayRouteApp(db, gateway, {
+        type: "board", userId: "instance-admin", source: "session", companyIds: [company.id],
+        memberships: [{ companyId: company.id, membershipRole: "owner", status: "active" }], isInstanceAdmin: true,
+      });
+      const call = () => keyKind === "derived"
+        ? request(app).post(named.endpointPath).set("authorization", `Bearer ${token.token}`).send({
+          jsonrpc: "2.0", id: "failed-operation", method: "tools/call",
+          params: { name: toolName, arguments: { key: "a", value: "b" } },
+        })
+        : request(app).post("/api/tool-gateway/tools/call").set("x-paperclip-tool-gateway-token", token.token).send({
+          tool: toolName, parameters: { key: "a", value: "b" }, idempotencyKey: "failed-operation", timeoutMs: 2_000,
+        });
+      const first = await call().expect(200);
+      const [initialInvocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id));
+      expect(initialInvocation.idempotencyKey).toEqual(expect.any(String));
+      const replay = await call().expect(200);
+      expect(remote.requests.filter(({ body }) => body?.method === "tools/call")).toHaveLength(1);
+      for (const response of [first, replay]) {
+        if (keyKind === "derived") {
+          expect.soft(response.body).toMatchObject({ jsonrpc: "2.0", id: "failed-operation", result: { isError: true } });
+        } else {
+          expect.soft(response.body).toMatchObject({ isError: true });
+        }
+        expect.soft(JSON.stringify(response.body)).toContain("Write rejected");
+        expect.soft(JSON.stringify(response.body)).not.toContain("synthetic-output-secret");
+      }
+      if (keyKind === "explicit") {
+        expect(first.body.status).toBe("completed");
+        expect(replay.body).toMatchObject({ status: "replayed", invocationId: initialInvocation.id });
+      }
+      const invocations = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id));
+      expect(invocations).toHaveLength(1);
+      expect.soft(invocations[0]).toMatchObject({
+        id: initialInvocation.id, gatewayId: named.id, status: "failed", errorCode: "mcp_tool_error",
+        policyDecision: "allow", idempotencyKey: initialInvocation.idempotencyKey,
+      });
+      expect.soft(JSON.stringify(invocations[0].resultSummary)).toContain("Write rejected");
+      expect.soft(JSON.stringify(invocations[0].resultSummary)).not.toContain("synthetic-output-secret");
+      if (keyKind === "explicit") {
+        const storedSummary = invocations[0].resultSummary!.summary as string;
+        expect(storedSummary.length).toBeLessThanOrEqual(4000);
+        expect(storedSummary.endsWith("...")).toBe(true);
+        expect(() => JSON.parse(storedSummary)).toThrow();
+      }
+      const [responsiveConnection] = await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id));
+      expect(responsiveConnection.healthStatus).toBe("ok");
+      const events = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, initialInvocation.id));
+      const failures = events.filter((event) => event.eventType === "call_failed");
+      expect.soft(failures).toHaveLength(1);
+      for (const event of failures) {
+        expect.soft(event).toMatchObject({ outcome: "failure", decision: "allow", reasonCode: "mcp_tool_error" });
+      }
+      expect.soft(events.filter((event) => event.eventType === "call_completed")).toEqual([]);
+      const receipts = await db.select().from(toolAccessAuditEvents).where(and(
+        eq(toolAccessAuditEvents.companyId, company.id),
+        eq(toolAccessAuditEvents.gatewayId, named.id),
+        eq(toolAccessAuditEvents.action, "call_failed"),
+      ));
+      expect.soft(receipts).toHaveLength(2);
+      for (const receipt of receipts) {
+        expect.soft(receipt).toMatchObject({
+          outcome: "failure", reasonCode: "mcp_tool_error",
+          details: { invocationId: initialInvocation.id, decision: "allow" },
+        });
+      }
+      expect.soft(receipts.filter((receipt) => receipt.details.replayed === true)).toHaveLength(1);
+      const failedAudit = await request(app).get("/api/tool-gateway/audit")
+        .query({ companyId: company.id, gateway: named.id, outcome: "failed", window: "all" }).expect(200);
+      const allowedAudit = await request(app).get("/api/tool-gateway/audit")
+        .query({ companyId: company.id, gateway: named.id, outcome: "allowed", window: "all" }).expect(200);
+      const failureRows = failedAudit.body.events.filter((event: { action: string }) => event.action === "tool_gateway.call_failed");
+      expect.soft(failureRows).toHaveLength(1);
+      expect.soft(allowedAudit.body.events.filter((event: { action: string }) => event.action === "tool_gateway.call_failed")).toEqual([]);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("persists named gateway attribution and scopes audit to the requested gateway", async () => {
     const company = await createCompany(db);
     const otherCompany = await createCompany(db);
@@ -1935,6 +2048,43 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       commandTemplateKey: localTool.templateKey,
       healthStatus: "ok",
     });
+  });
+
+  it("records a local stdio MCP tool error without degrading its responsive runtime", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const localTool = await createLocalStdioMcpTool(db, company.id, {
+      stdioScript: `
+const readline = require("node:readline");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  const result = message.method === "initialize"
+    ? { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "error-stdio", version: "1" } }
+    : { isError: true, content: [{ type: "text", text: "Local operation was denied" }] };
+  if (message.id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+});
+`,
+    });
+    await allowAllToolsForAgent(db, company.id, agent.id);
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    const toolName = expectedConnectedToolName({
+      applicationKey: localTool.application.applicationKey,
+      connectionId: localTool.connection.id,
+      toolName: localTool.catalogEntry.toolName,
+    });
+    const result = await gateway.executeTool({ sessionToken: session.token, tool: toolName, parameters: { message: "hello" } });
+    expect(result).toMatchObject({
+      status: "completed",
+      result: { content: "Local operation was denied", data: { isError: true, transport: "local_stdio" } },
+    });
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, result.invocationId));
+    expect.soft(invocation).toMatchObject({ status: "failed", errorCode: "mcp_tool_error" });
+    const [slot] = await db.select().from(toolRuntimeSlots).where(eq(toolRuntimeSlots.connectionId, localTool.connection.id));
+    expect(slot).toMatchObject({ status: "idle", healthStatus: "ok" });
+    const [connection] = await db.select().from(toolConnections).where(eq(toolConnections.id, localTool.connection.id));
+    expect(connection.healthStatus).toBe("ok");
   });
 
   it("passes only approved env values to local stdio MCP processes", async () => {
