@@ -941,6 +941,78 @@ describeEmbeddedPostgres("tool access policy service", () => {
     expect(replay.invocation.id).toBe(first.invocation.id);
   });
 
+  it.each([
+    ["derived", "named-to-named"],
+    ["derived", "named-to-null"],
+    ["derived", "null-to-named"],
+    ["explicit", "named-to-named"],
+    ["explicit", "named-to-null"],
+    ["explicit", "null-to-named"],
+  ] as const)("scopes side-effecting invocation replay for %s keys across %s", async (keyKind, boundary) => {
+    const company = await createCompany(db);
+    const { connection, catalogEntry } = await createTool(db, company.id);
+    const [profile] = await db.insert(toolProfiles).values({
+      companyId: company.id,
+      profileKey: `replay-${randomUUID()}`,
+      name: "Replay boundary fixture",
+      defaultAction: "deny",
+    }).returning();
+    await db.insert(toolProfileEntries).values({
+      companyId: company.id,
+      profileId: profile!.id,
+      selectorType: "tool_name",
+      effect: "include",
+      toolName: "send_email",
+    });
+    await db.insert(toolProfileBindings).values({
+      companyId: company.id,
+      profileId: profile!.id,
+      targetType: "company",
+      targetId: company.id,
+    });
+    const gateways = await db.insert(toolMcpGateways).values([0, 1].map((index) => ({
+      companyId: company.id,
+      profileId: profile!.id,
+      name: `Replay gateway ${index}`,
+      slug: `replay-${randomUUID()}`,
+    }))).returning();
+    const ownerGatewayId = boundary === "null-to-named" ? null : gateways[0]!.id;
+    const otherGatewayId = boundary === "named-to-null" ? null : gateways[1]!.id;
+    const input = {
+      companyId: company.id,
+      actor: { actorType: "system" as const, actorId: randomUUID() },
+      runContext: { gatewayId: ownerGatewayId },
+      request: {
+        connectionId: connection.id,
+        catalogEntryId: catalogEntry.id,
+        toolName: "send_email",
+        arguments: { to: "ops@example.com", body: "only once" },
+        sideEffecting: true,
+        ...(keyKind === "explicit" ? { idempotencyKey: "shared-send-1" } : {}),
+      },
+    };
+    const svc = toolAccessPolicyService(db);
+    const decision = await svc.decide(input);
+    expect(decision.allowed).toBe(true);
+    const first = await svc.recordInvocation(input, decision);
+    const replay = await svc.recordInvocation(input, decision);
+    expect(first.replayed).toBe(false);
+    expect(first.invocation.gatewayId).toBe(ownerGatewayId);
+    expect(replay).toMatchObject({ replayed: true, invocation: { id: first.invocation.id, gatewayId: ownerGatewayId } });
+    if (keyKind === "explicit") expect(first.invocation.idempotencyKey).toBe("shared-send-1");
+    else expect(first.invocation.idempotencyKey).toMatch(/^side_effect:/);
+
+    const otherInput = { ...input, runContext: { gatewayId: otherGatewayId } };
+    const otherDecision = await svc.decide(otherInput);
+    expect(otherDecision.allowed).toBe(true);
+    await expect(svc.recordInvocation(otherInput, otherDecision)).rejects.toMatchObject({
+      status: 409, details: { reasonCode: "idempotency_gateway_mismatch" },
+    });
+    const invocations = await db.select().from(toolInvocations);
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toMatchObject({ id: first.invocation.id, gatewayId: ownerGatewayId });
+  });
+
   it("enforces rate-limit policies before explicit grants", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);

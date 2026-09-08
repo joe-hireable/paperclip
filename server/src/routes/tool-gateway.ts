@@ -202,12 +202,16 @@ async function handleMcpGatewayProtocol(
     }
     res.status(404).json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
   } catch (err) {
-    if (err instanceof ToolGatewayHttpError) {
+    if (err instanceof ToolGatewayHttpError || err instanceof HttpError) {
       const id = (req.body as { id?: unknown } | undefined)?.id ?? null;
       res.status(err.status).json({
         jsonrpc: "2.0",
         id,
-        error: { code: err.status >= 500 ? -32603 : -32000, message: err.message, data: { reasonCode: err.reasonCode, ...err.details } },
+        error: {
+          code: err.status >= 500 ? -32603 : -32000,
+          message: err.message,
+          data: err instanceof ToolGatewayHttpError ? { reasonCode: err.reasonCode, ...err.details } : err.details,
+        },
       });
       return;
     }

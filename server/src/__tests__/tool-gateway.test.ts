@@ -731,6 +731,92 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it.each(["derived", "explicit"] as const)("isolates named gateway side-effect results for %s keys", async (keyKind) => {
+    const company = await createCompany(db);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({
+      body: {
+        jsonrpc: "2.0",
+        id: body?.id,
+        result: { content: [{ type: "text", text: "first gateway private result" }], isError: false },
+      },
+    }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url,
+        toolName: "update_note",
+        riskLevel: "write",
+      });
+      const toolName = expectedConnectedToolName({
+        applicationKey: application.applicationKey,
+        connectionId: connection.id,
+        toolName: catalogEntry.toolName,
+      });
+      const [profile] = await db.insert(toolProfiles).values({
+        companyId: company.id,
+        profileKey: `gateway-replay-${randomUUID()}`,
+        name: "Gateway replay writer",
+        defaultAction: "deny",
+      }).returning();
+      await db.insert(toolProfileEntries).values({
+        companyId: company.id,
+        profileId: profile!.id,
+        selectorType: "catalog_entry",
+        effect: "include",
+        applicationId: application.id,
+        connectionId: connection.id,
+        catalogEntryId: catalogEntry.id,
+      });
+      const gateway = createTestToolGatewayService(db);
+      const clients = [];
+      for (const name of ["First writer", "Second writer"]) {
+        const created = await gateway.createNamedGateway({ companyId: company.id, body: { name, profileId: profile!.id } });
+        const token = await gateway.createNamedGatewayToken({
+          companyId: company.id,
+          gatewayId: created.id,
+          body: { name, allowedActions: ["tools/call"] },
+        });
+        clients.push({ gatewayId: created.id, endpointPath: created.endpointPath, token: token.token });
+      }
+      const app = createGatewayRouteApp(db, gateway);
+      const call = (token: string) => request(app).post("/api/tool-gateway/tools/call")
+        .set("x-paperclip-tool-gateway-token", token)
+        .send({
+          tool: toolName,
+          parameters: { key: "a", value: "b" },
+          timeoutMs: 2_000,
+          ...(keyKind === "explicit" ? { idempotencyKey: "shared-update-1" } : {}),
+        });
+      const first = await call(clients[0]!.token).expect(200);
+      expect(first.body).toMatchObject({ status: "completed", result: { content: "first gateway private result" } });
+      const replay = await call(clients[0]!.token).expect(200);
+      expect(replay.body).toMatchObject({ status: "replayed", invocationId: first.body.invocationId });
+      const collision = await call(clients[1]!.token);
+      expect.soft(collision.status).toBe(409);
+      expect.soft(collision.body.reasonCode).toBe("idempotency_gateway_mismatch");
+      expect.soft(JSON.stringify(collision.body)).not.toContain("first gateway private result");
+      expect.soft(collision.body.invocationId).not.toBe(first.body.invocationId);
+      if (keyKind === "derived") {
+        const protocolCollision = await request(app).post(clients[1]!.endpointPath)
+          .set("authorization", `Bearer ${clients[1]!.token}`)
+          .send({ jsonrpc: "2.0", id: "gateway-collision", method: "tools/call", params: {
+            name: toolName, arguments: { key: "a", value: "b" },
+          } });
+        expect.soft(protocolCollision.status).toBe(409);
+        expect.soft(protocolCollision.body).toMatchObject({
+          jsonrpc: "2.0", id: "gateway-collision", error: { code: -32000, data: { reasonCode: "idempotency_gateway_mismatch" } },
+        });
+        expect.soft(JSON.stringify(protocolCollision.body)).not.toContain("first gateway private result");
+        expect.soft(protocolCollision.body.result).toBeUndefined();
+      }
+      expect(remote.requests.filter(({ body }) => body?.method === "tools/call")).toHaveLength(1);
+      const invocations = await db.select().from(toolInvocations);
+      expect(invocations).toHaveLength(1);
+      expect(invocations[0]).toMatchObject({ id: first.body.invocationId, gatewayId: clients[0]!.gatewayId });
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("persists named gateway attribution and scopes audit to the requested gateway", async () => {
     const company = await createCompany(db);
     const otherCompany = await createCompany(db);
@@ -3789,6 +3875,94 @@ rl.on("line", (line) => {
     } finally {
       releaseApprovedExecution();
       await fake.close();
+    }
+  });
+
+  it.each(["matching", "explicit"] as const)("isolates named gateway approved actions from %s reuse", async (reuse) => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({
+      body: {
+        jsonrpc: "2.0",
+        id: body?.id,
+        result: { content: [{ type: "text", text: "approved first gateway result" }], isError: false },
+      },
+    }));
+    try {
+      const { application, connection, catalogEntry } = await createRemoteMcpTool(db, company.id, {
+        url: remote.url, toolName: "update_note", riskLevel: "write",
+      });
+      const toolName = expectedConnectedToolName({
+        applicationKey: application.applicationKey, connectionId: connection.id, toolName: catalogEntry.toolName,
+      });
+      const [profile] = await db.insert(toolProfiles).values({
+        companyId: company.id, profileKey: `approval-boundary-${randomUUID()}`,
+        name: "Gateway approved writer", defaultAction: "deny",
+      }).returning();
+      await db.insert(toolProfileEntries).values({
+        companyId: company.id, profileId: profile!.id, selectorType: "catalog_entry", effect: "include",
+        applicationId: application.id, connectionId: connection.id, catalogEntryId: catalogEntry.id,
+      });
+      await db.insert(toolPolicies).values({
+        companyId: company.id, name: "Review gateway writes", policyType: "require_approval",
+        selectors: { connectionId: connection.id }, priority: 10,
+      });
+      const gateway = createTestToolGatewayService(db);
+      const clients = [];
+      for (const name of ["Approved writer", "Sibling writer"]) {
+        const created = await gateway.createNamedGateway({
+          companyId: company.id, body: { name, profileId: profile!.id, defaultProfileMode: "gateway_only" },
+        });
+        const token = await gateway.createNamedGatewayToken({
+          companyId: company.id, gatewayId: created.id,
+          body: {
+            name, subjectType: "heartbeat_run", subjectId: run.id,
+            clientLabel: "Heartbeat fixture", ownerNote: "Gateway approval boundary regression",
+            allowedActions: ["tools/call"], expiresAt: new Date(Date.now() + 60_000),
+          },
+          actor: { agentId: agent.id },
+        });
+        clients.push({ gatewayId: created.id, token: token.token });
+      }
+      const call = { tool: toolName, parameters: { key: "a", value: "b" } };
+      await expect(gateway.executeTool({ ...call, sessionToken: clients[0]!.token }))
+        .rejects.toMatchObject({ status: 409, reasonCode: "approval_required" });
+      const [action] = await db.select().from(toolActionRequests);
+      expect(action).toMatchObject({ issueId: issue.id, status: "pending" });
+      await db.update(issueThreadInteractions).set({
+        status: "accepted", resolvedByAgentId: agent.id, resolvedAt: new Date(),
+      }).where(eq(issueThreadInteractions.id, action!.interactionId!));
+      await db.update(toolActionRequests).set({ status: "approved", resolvedAt: new Date() })
+        .where(eq(toolActionRequests.id, action!.id));
+      if (reuse === "matching") {
+        const first = await gateway.executeTool({
+          ...call, sessionToken: clients[0]!.token, approvedActionRequestId: action!.id,
+        });
+        expect(first).toMatchObject({ status: "completed", result: { content: "approved first gateway result" } });
+      }
+      const other = await gateway.executeTool({
+        ...call, sessionToken: clients[1]!.token,
+        ...(reuse === "explicit" ? { approvedActionRequestId: action!.id } : {}),
+      }).then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+      expect.soft(other.error).toMatchObject(reuse === "explicit"
+        ? { status: 403, reasonCode: "action_scope_mismatch" }
+        : { status: 409, details: { reasonCode: "idempotency_gateway_mismatch" } });
+      expect.soft(other.value).toBeNull();
+      expect(remote.requests.filter(({ body }) => body?.method === "tools/call")).toHaveLength(reuse === "matching" ? 1 : 0);
+      const actions = await db.select().from(toolActionRequests);
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toMatchObject({
+        id: action!.id, invocationId: action!.invocationId, status: reuse === "matching" ? "executed" : "approved",
+      });
+      const invocations = await db.select().from(toolInvocations);
+      expect(invocations).toHaveLength(1);
+      expect(invocations[0]).toMatchObject({
+        id: action!.invocationId, gatewayId: clients[0]!.gatewayId, agentId: agent.id, runId: run.id,
+        status: reuse === "matching" ? "succeeded" : "awaiting_approval",
+      });
+    } finally {
+      await remote.close();
     }
   });
 

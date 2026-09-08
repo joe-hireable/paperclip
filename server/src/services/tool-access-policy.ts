@@ -1423,7 +1423,14 @@ export function toolAccessPolicyService(db: Db) {
         eq(toolInvocations.companyId, input.companyId),
         eq(toolInvocations.idempotencyKey, idempotencyKey),
       ));
-      if (existing) return { invocation: existing, replayed: true, actionRequest: null };
+      if (existing) {
+        if (existing.gatewayId !== ctx.gatewayId) {
+          throw conflict("Tool invocation idempotency key belongs to a different gateway", {
+            reasonCode: "idempotency_gateway_mismatch",
+          });
+        }
+        return { invocation: existing, replayed: true, actionRequest: null };
+      }
     }
     const status = accessDecision.decision === "allow"
       ? "authorized"
