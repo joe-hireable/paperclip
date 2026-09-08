@@ -18,6 +18,7 @@ import {
   toolCallEvents,
   toolConnections,
   toolInvocations,
+  toolMcpGateways,
   toolPolicies,
   toolProfileBindings,
   toolProfileEntries,
@@ -119,6 +120,7 @@ async function createApprovedToolAction(input: {
   connectionId: string;
   catalogEntryId: string;
   issueId?: string | null;
+  gatewayId?: string | null;
   argumentsValue: Record<string, unknown>;
   status?: "approved" | "executed";
 }) {
@@ -126,7 +128,7 @@ async function createApprovedToolAction(input: {
   const decisionInput = {
     companyId: input.companyId,
     actor: { actorType: "agent" as const, actorId: input.agentId, agentId: input.agentId },
-    runContext: { issueId: input.issueId ?? null },
+    runContext: { issueId: input.issueId ?? null, gatewayId: input.gatewayId ?? null },
     request: {
       connectionId: input.connectionId,
       catalogEntryId: input.catalogEntryId,
@@ -167,6 +169,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     await db.delete(toolPolicies);
     await db.delete(toolProfileEntries);
     await db.delete(toolProfileBindings);
+    await db.delete(toolMcpGateways);
     await db.delete(toolProfiles);
     await db.delete(toolCatalogEntries);
     await db.delete(toolConnections);
@@ -736,6 +739,59 @@ describeEmbeddedPostgres("tool access policy service", () => {
     });
   });
 
+  it.each(["missing", "foreign", "disabled-own", "own-disabled-connection"] as const)(
+    "keeps gateway audit attribution company-scoped for %s context",
+    async (kind) => {
+      const company = await createCompany(db);
+      const { connection } = await createTool(db, company.id);
+      let gatewayId: string = randomUUID();
+      if (kind !== "missing") {
+        const gatewayCompany = kind === "foreign" ? await createCompany(db) : company;
+        const [profile] = await db.insert(toolProfiles).values({
+          companyId: gatewayCompany.id,
+          profileKey: `gateway-${randomUUID()}`,
+          name: "Gateway audit fixture",
+          defaultAction: "deny",
+        }).returning();
+        const [gateway] = await db.insert(toolMcpGateways).values({
+          companyId: gatewayCompany.id,
+          profileId: profile!.id,
+          name: "Gateway audit fixture",
+          slug: `gateway-${randomUUID()}`,
+          status: kind === "disabled-own" ? "disabled" : "active",
+        }).returning();
+        gatewayId = gateway!.id;
+      }
+      if (kind === "own-disabled-connection") {
+        await db.update(toolConnections).set({ enabled: false }).where(eq(toolConnections.id, connection.id));
+      }
+      const input = {
+        companyId: company.id,
+        actor: { actorType: "system" as const, actorId: randomUUID() },
+        runContext: { gatewayId },
+        request: { connectionId: connection.id, toolName: "send_email" },
+      };
+      const svc = toolAccessPolicyService(db);
+      const decision = await svc.decide(input);
+      const knownOwnGateway = kind === "disabled-own" || kind === "own-disabled-connection";
+      expect(decision).toMatchObject({
+        allowed: false,
+        reasonCode: kind === "disabled-own" ? "deny_default"
+          : kind === "own-disabled-connection" ? "deny_disabled_connection" : "deny_company_boundary",
+      });
+      const audit = await svc.writeAudit(input, decision);
+      for (const row of [audit.legacyAuditEvent, audit.toolCallEvent]) {
+        expect(row).toMatchObject({ companyId: company.id, gatewayId: knownOwnGateway ? gatewayId : null });
+      }
+      if (kind === "disabled-own") {
+        const recorded = await svc.recordInvocation(input, decision);
+        expect(recorded.invocation).toMatchObject({ gatewayId, agentId: null, runId: null, status: "denied" });
+      } else {
+        await expect(svc.recordInvocation(input, decision)).rejects.toThrow("Cannot record invocation for invalid tool access context");
+      }
+    },
+  );
+
   it("audits denied calls without storing secret argument values", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
@@ -1232,11 +1288,27 @@ describeEmbeddedPostgres("tool access policy service", () => {
     });
   });
 
-  it("promotes repeated approved actions into a scoped trust rule with audited hits", async () => {
+  it.each([false, true])("promotes repeated approved actions with audited hits (named gateway: %s)", async (namedGateway) => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
     const issue = await createIssue(db, company.id);
     const { connection, catalogEntry } = await createTool(db, company.id);
+    let gatewayId: string | null = null;
+    if (namedGateway) {
+      const [profile] = await db.insert(toolProfiles).values({
+        companyId: company.id,
+        profileKey: `gateway-${randomUUID()}`,
+        name: "Trust rule gateway",
+        defaultAction: "deny",
+      }).returning();
+      const [gateway] = await db.insert(toolMcpGateways).values({
+        companyId: company.id,
+        profileId: profile!.id,
+        name: "Trust rule gateway",
+        slug: `gateway-${randomUUID()}`,
+      }).returning();
+      gatewayId = gateway!.id;
+    }
     await db.insert(toolPolicies).values({
       companyId: company.id,
       name: "Review send_email",
@@ -1254,6 +1326,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
       issueId: issue.id,
       argumentsValue: args,
       status: "executed",
+      gatewayId,
     });
     await createApprovedToolAction({
       db,
@@ -1263,6 +1336,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
       catalogEntryId: catalogEntry.id,
       issueId: issue.id,
       argumentsValue: args,
+      gatewayId,
     });
 
     const trustRule = await toolAccessPolicyService(db).createTrustRuleFromActionRequest({
@@ -1282,6 +1356,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     const [updatedRule] = await db.select().from(toolPolicies).where(eq(toolPolicies.id, trustRule.id));
     const trustConfig = updatedRule.config as { trustRule?: { hitCount?: number; lastHitAt?: string | null } };
     const trustEvents = await db.select().from(toolCallEvents);
+    const legacyTrustEvents = await db.select().from(toolAccessAuditEvents);
 
     expect(trustRule).toMatchObject({
       policyType: "trust_rule",
@@ -1302,8 +1377,14 @@ describeEmbeddedPostgres("tool access policy service", () => {
     });
     expect(trustConfig.trustRule?.hitCount).toBe(1);
     expect(trustConfig.trustRule?.lastHitAt).toEqual(expect.any(String));
-    expect(trustEvents.some((event) => event.eventType === "trust_rule_created")).toBe(true);
-    expect(trustEvents.some((event) => event.eventType === "trust_rule_used")).toBe(true);
+    for (const eventType of ["trust_rule_created", "trust_rule_used"]) {
+      expect(trustEvents.filter((event) => event.eventType === eventType)).toMatchObject([
+        { companyId: company.id, gatewayId },
+      ]);
+      expect(legacyTrustEvents.filter((event) => event.action === `tool_access.${eventType}`)).toMatchObject([
+        { companyId: company.id, gatewayId },
+      ]);
+    }
   });
 
   it("does not count approved actions outside the final trust-rule agent scope", async () => {

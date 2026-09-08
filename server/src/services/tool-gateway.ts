@@ -1522,6 +1522,7 @@ export function createToolGatewayService(
     const metadata = input.tool ? toolAuditMetadata(input.tool) : {};
     await db.insert(toolCallEvents).values({
       companyId: input.session.companyId,
+      gatewayId: input.session.gatewayId ?? null,
       invocationId: input.invocationId ?? null,
       actionRequestId: input.actionRequestId ?? null,
       eventType: input.eventType,
@@ -6910,6 +6911,7 @@ export function createToolGatewayService(
         });
         const [invocation] = await db.insert(toolInvocations).values({
           companyId: session.companyId,
+          gatewayId: session.gatewayId ?? null,
           actorType: session.actorType ?? (session.agentId ? "agent" : "system"),
           actorId: session.actorId ?? session.agentId ?? session.gatewayTokenId ?? session.companyId,
           agentId: session.agentId,

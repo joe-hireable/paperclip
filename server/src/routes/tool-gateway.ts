@@ -834,6 +834,7 @@ export function toolGatewayRoutes(db: Db, toolGateway: ToolGatewayService) {
         .select({
           row: toolCallEvents,
           invocationId: toolInvocations.id,
+          invocationGatewayId: toolInvocations.gatewayId,
           invocationAgentId: toolInvocations.agentId,
           invocationApplicationId: toolInvocations.applicationId,
           invocationConnectionId: toolInvocations.connectionId,
@@ -968,6 +969,7 @@ export function toolGatewayRoutes(db: Db, toolGateway: ToolGatewayService) {
 
         const item = candidate.item;
         const row = item.row;
+        const gatewayId = row.gatewayId ?? item.invocationGatewayId;
         const agentId = row.agentId ?? item.invocationAgentId;
         const connectionId = row.connectionId ?? item.invocationConnectionId;
         const connection = connectionId ? connectionsById.get(connectionId) ?? null : null;
@@ -983,7 +985,7 @@ export function toolGatewayRoutes(db: Db, toolGateway: ToolGatewayService) {
           ...(row.metadata ?? {}),
           invocationId: row.invocationId,
           actionRequestId: row.actionRequestId,
-          gatewayId: row.gatewayId,
+          gatewayId,
           agentId,
           issueId: row.issueId,
           runId: row.runId,

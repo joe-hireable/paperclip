@@ -731,6 +731,173 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it("persists named gateway attribution and scopes audit to the requested gateway", async () => {
+    const company = await createCompany(db);
+    const otherCompany = await createCompany(db);
+    const remote = await startFakeRemoteMcpServer(({ body }) => ({
+      body: {
+        jsonrpc: "2.0",
+        id: body?.id ?? "test",
+        result: { content: [{ type: "text", text: "read ok" }], isError: false },
+      },
+    }));
+    try {
+      const gateway = createTestToolGatewayService(db);
+      const app = createGatewayRouteApp(db, gateway, {
+        type: "board",
+        userId: "instance-admin",
+        source: "session",
+        companyIds: [company.id, otherCompany.id],
+        memberships: [company, otherCompany].map(({ id }) => ({
+          companyId: id, membershipRole: "owner", status: "active",
+        })),
+        isInstanceAdmin: true,
+      });
+      const completed: Array<{
+        companyId: string; gatewayId: string; tokenId: string; invocationId: string;
+        token: string; toolName: string;
+      }> = [];
+      for (const owner of [company, company, otherCompany]) {
+        const { application, connection, catalogEntry } = await createRemoteMcpTool(db, owner.id, {
+          url: remote.url,
+          toolName: "read_note",
+          riskLevel: "read",
+          connectionConfig: { onDemandTools: { enabled: true } },
+        });
+        const toolName = expectedConnectedToolName({
+          applicationKey: application.applicationKey,
+          connectionId: connection.id,
+          toolName: catalogEntry.toolName,
+        });
+        const [profile] = await db.insert(toolProfiles).values({
+          companyId: owner.id,
+          profileKey: `gateway-audit-${randomUUID()}`,
+          name: `Gateway audit reader ${randomUUID()}`,
+          defaultAction: "deny",
+        }).returning();
+        await db.insert(toolProfileEntries).values({
+          companyId: owner.id,
+          profileId: profile!.id,
+          selectorType: "catalog_entry",
+          effect: "include",
+          applicationId: application.id,
+          connectionId: connection.id,
+          catalogEntryId: catalogEntry.id,
+        });
+        const created = await gateway.createNamedGateway({
+          companyId: owner.id,
+          body: { name: `Audit reader ${randomUUID()}`, profileId: profile!.id },
+        });
+        const token = await gateway.createNamedGatewayToken({
+          companyId: owner.id,
+          gatewayId: created.id,
+          body: { name: "Audit fixture", allowedActions: ["tools/list", "tools/call"] },
+        });
+        const response = await request(app)
+          .post("/api/tool-gateway/tools/call")
+          .set("x-paperclip-tool-gateway-token", token.token)
+          .send({ tool: toolName, parameters: { key: "a", value: "b" }, timeoutMs: 2_000 })
+          .expect(200);
+        expect(response.body).toMatchObject({
+          status: "completed",
+          tool: toolName,
+          result: { content: "read ok", data: { isError: false, transport: "mcp_http" } },
+        });
+        completed.push({
+          companyId: owner.id, gatewayId: created.id, tokenId: token.id,
+          invocationId: response.body.invocationId as string,
+          token: token.token, toolName,
+        });
+      }
+      expect(remote.requests.filter(({ body }) => body?.method === "tools/call")).toHaveLength(3);
+      for (const call of completed) {
+        const [invocation] = await db.select().from(toolInvocations)
+          .where(eq(toolInvocations.id, call.invocationId));
+        const events = await db.select().from(toolCallEvents).where(and(
+          eq(toolCallEvents.invocationId, call.invocationId),
+          eq(toolCallEvents.eventType, "call_completed"),
+        ));
+        const audit = await request(app).get("/api/tool-gateway/audit")
+          .query({ companyId: call.companyId, gateway: call.gatewayId, limit: 100, window: "all" })
+          .expect(200);
+        expect(events).toHaveLength(1);
+        const expectedActor = {
+          companyId: call.companyId,
+          actorType: "system",
+          actorId: call.tokenId,
+          agentId: null,
+          runId: null,
+          issueId: null,
+        };
+        expect(invocation).toMatchObject({ ...expectedActor, status: "succeeded" });
+        expect(events[0]).toMatchObject({ ...expectedActor, outcome: "success" });
+        expect.soft(invocation?.gatewayId).toBe(call.gatewayId);
+        expect.soft(events[0]?.gatewayId).toBe(call.gatewayId);
+        const auditCompletions = audit.body.events.filter((event: { action: string }) =>
+          event.action === "tool_gateway.call_completed");
+        expect.soft(auditCompletions).toMatchObject([{
+          actorType: "system",
+          actorId: call.tokenId,
+          companyId: call.companyId,
+          agentId: null,
+          runId: null,
+          details: { gatewayId: call.gatewayId, invocationId: call.invocationId },
+          invocation: { id: call.invocationId, status: "succeeded", policyDecision: "allow" },
+        }]);
+        expect.soft(auditCompletions.map((event: { invocation: { id: string } }) => event.invocation.id))
+          .toEqual([call.invocationId]);
+      }
+      const firstCall = completed[0]!;
+      await db.update(toolCallEvents).set({
+        gatewayId: null,
+        metadata: { gatewayId: completed[1]!.gatewayId },
+      }).where(and(
+        eq(toolCallEvents.invocationId, firstCall.invocationId),
+        eq(toolCallEvents.eventType, "call_completed"),
+      ));
+      const fallbackAudit = await request(app).get("/api/tool-gateway/audit")
+        .query({ companyId: company.id, gateway: firstCall.gatewayId, limit: 100, window: "all" })
+        .expect(200);
+      expect(fallbackAudit.body.events.filter((event: { action: string }) =>
+        event.action === "tool_gateway.call_completed")).toMatchObject([{
+          details: { gatewayId: firstCall.gatewayId, invocationId: firstCall.invocationId },
+          invocation: { id: firstCall.invocationId, status: "succeeded" },
+        }]);
+      const crossCompany = await request(app).get("/api/tool-gateway/audit")
+        .query({ companyId: company.id, gateway: completed[2]!.gatewayId, limit: 100, window: "all" })
+        .expect(200);
+      expect(crossCompany.body.events).toEqual([]);
+      const search = await request(app)
+        .post("/api/tool-gateway/tools/call")
+        .set("x-paperclip-tool-gateway-token", firstCall.token)
+        .send({ tool: "search_tools", parameters: { query: "read_note", limit: 5 } })
+        .expect(200);
+      expect(search.body).toMatchObject({
+        status: "completed",
+        tool: "search_tools",
+        result: { data: { tools: [{ name: firstCall.toolName }] } },
+      });
+      const [searchInvocation] = await db.select().from(toolInvocations)
+        .where(eq(toolInvocations.id, search.body.invocationId as string));
+      const searchEvents = await db.select().from(toolCallEvents).where(and(
+        eq(toolCallEvents.invocationId, search.body.invocationId as string),
+        eq(toolCallEvents.eventType, "call_completed"),
+      ));
+      const expectedSearchActor = {
+        companyId: company.id, gatewayId: firstCall.gatewayId,
+        actorType: "system", actorId: firstCall.tokenId,
+        agentId: null, runId: null, issueId: null, toolName: "search_tools",
+      };
+      expect(searchInvocation).toMatchObject({
+        ...expectedSearchActor, providerType: "paperclip_virtual", status: "succeeded",
+      });
+      expect(searchEvents).toMatchObject([{ ...expectedSearchActor, outcome: "success" }]);
+      expect(remote.requests.filter(({ body }) => body?.method === "tools/call")).toHaveLength(3);
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("keeps additive app-gallery assignments out of gateway-only runtimes", async () => {
     const company = await createCompany(db);
     const assigned = await createRemoteMcpTool(db, company.id, {
@@ -1354,6 +1521,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       agentId: agent.id,
       issueId: issue.id,
       runId: run.id,
+      gatewayId: null,
       toolName: "mcp-remote-fixture:add",
       status: "succeeded",
     });
@@ -1363,6 +1531,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
       agentId: agent.id,
       issueId: issue.id,
       runId: run.id,
+      gatewayId: null,
       toolName: "mcp-remote-fixture:add",
       outcome: "success",
     });
@@ -1373,6 +1542,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     expect(dedicatedAudit).toMatchObject({
       issueId: issue.id,
       runId: run.id,
+      gatewayId: null,
       toolName: "mcp-remote-fixture:add",
     });
   });

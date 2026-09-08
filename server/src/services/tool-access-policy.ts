@@ -838,6 +838,15 @@ export function toolAccessPolicyService(db: Db) {
     return deleted;
   }
 
+  async function resolveCompanyGatewayId(companyId: string, gatewayId?: string | null): Promise<string | null> {
+    if (!gatewayId) return null;
+    const [gateway] = await db.select({ id: toolMcpGateways.id }).from(toolMcpGateways).where(and(
+      eq(toolMcpGateways.companyId, companyId),
+      eq(toolMcpGateways.id, gatewayId),
+    )).limit(1);
+    return gateway?.id ?? null;
+  }
+
   async function loadContext(input: ToolAccessDecisionInput): Promise<
     | { ok: true; ctx: ToolAccessContext; redaction: RedactionResult }
     | { ok: false; decision: ToolAccessDecision; redaction: RedactionResult }
@@ -849,6 +858,10 @@ export function toolAccessPolicyService(db: Db) {
     let projectId = input.runContext?.projectId ?? null;
     let routineId = input.runContext?.routineId ?? null;
     const gatewayId = input.runContext?.gatewayId ?? null;
+
+    if (gatewayId && !(await resolveCompanyGatewayId(input.companyId, gatewayId))) {
+      return { ok: false, redaction, decision: decision("deny", "deny_company_boundary", "Gateway context is outside the company or no longer exists.", [], [], { redactionPlan: redaction.redactionPlan }) };
+    }
 
     if (input.actor.actorType === "agent") {
       const [agent] = await db.select().from(agents).where(and(eq(agents.id, agentId ?? ""), eq(agents.companyId, input.companyId)));
@@ -1136,6 +1149,7 @@ export function toolAccessPolicyService(db: Db) {
       .where(eq(toolPolicies.id, policy.id));
     await db.insert(toolAccessAuditEvents).values({
       companyId: ctx.companyId,
+      gatewayId: ctx.gatewayId,
       connectionId: ctx.connectionId,
       catalogEntryId: ctx.catalogEntryId,
       actorType: ctx.actorType,
@@ -1155,6 +1169,7 @@ export function toolAccessPolicyService(db: Db) {
     });
     await db.insert(toolCallEvents).values({
       companyId: ctx.companyId,
+      gatewayId: ctx.gatewayId,
       eventType: "trust_rule_used",
       actorType: ctx.actorType,
       actorId: ctx.actorId,
@@ -1306,13 +1321,15 @@ export function toolAccessPolicyService(db: Db) {
   ) {
     const loaded = await loadContext(input);
     const redaction = loaded.redaction;
+    const gatewayId = loaded.ok ? loaded.ctx.gatewayId
+      : await resolveCompanyGatewayId(input.companyId, input.runContext?.gatewayId);
     const ctx = loaded.ok ? loaded.ctx : {
       companyId: input.companyId,
       actorType: input.actor.actorType,
       actorId: input.actor.actorId,
       agentId: input.actor.agentId ?? null,
       issueId: input.runContext?.issueId ?? null,
-      gatewayId: input.runContext?.gatewayId ?? null,
+      gatewayId,
       runId: input.runContext?.heartbeatRunId ?? null,
       connectionId: input.request.connectionId ?? null,
       catalogEntryId: input.request.catalogEntryId ?? null,
@@ -1327,6 +1344,7 @@ export function toolAccessPolicyService(db: Db) {
     try {
       const [legacyAuditEvent] = await db.insert(toolAccessAuditEvents).values({
         companyId: input.companyId,
+        gatewayId,
         connectionId: ctx.connectionId,
         catalogEntryId: ctx.catalogEntryId,
         actorType: ctx.actorType,
@@ -1355,6 +1373,7 @@ export function toolAccessPolicyService(db: Db) {
       }).returning();
       const [toolCallEvent] = await db.insert(toolCallEvents).values({
         companyId: input.companyId,
+        gatewayId,
         eventType: eventType as typeof toolCallEvents.$inferInsert["eventType"],
         actorType: ctx.actorType,
         actorId: ctx.actorId,
@@ -1415,6 +1434,7 @@ export function toolAccessPolicyService(db: Db) {
           : "denied";
     const [invocation] = await db.insert(toolInvocations).values({
       companyId: ctx.companyId,
+      gatewayId: ctx.gatewayId,
       idempotencyKey,
       actorType: ctx.actorType,
       actorId: ctx.actorId,
@@ -1689,6 +1709,7 @@ export function toolAccessPolicyService(db: Db) {
     if (approvedCount < approvalThreshold) {
       throw unprocessable(`Trust rule requires ${approvalThreshold} matching approved actions in the final rule scope; found ${approvedCount}`);
     }
+    const gatewayId = await resolveCompanyGatewayId(input.companyId, invocation.gatewayId);
     const now = new Date();
     const expiresAt = isoDateOrNull(input.body.expiresAt);
     const name = input.body.name ?? `Trust ${invocation.toolName} ${actionRequest.id.slice(0, 8)}`;
@@ -1726,6 +1747,7 @@ export function toolAccessPolicyService(db: Db) {
 
     await db.insert(toolAccessAuditEvents).values({
       companyId: input.companyId,
+      gatewayId,
       connectionId: invocation.connectionId,
       catalogEntryId: invocation.catalogEntryId,
       actorType: input.actor?.agentId ? "agent" : input.actor?.userId ? "user" : "system",
@@ -1746,6 +1768,7 @@ export function toolAccessPolicyService(db: Db) {
     });
     await db.insert(toolCallEvents).values({
       companyId: input.companyId,
+      gatewayId,
       eventType: "trust_rule_created",
       actorType: input.actor?.agentId ? "agent" : input.actor?.userId ? "user" : "system",
       actorId: input.actor?.agentId ?? input.actor?.userId ?? null,
