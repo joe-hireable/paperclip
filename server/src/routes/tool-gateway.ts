@@ -184,7 +184,7 @@ async function handleMcpGatewayProtocol(
         result: {
           content: [{ type: "text", text: contentText }],
           structuredContent: resultRecord?.data ?? null,
-          isError: false,
+          isError: "isError" in result && result.isError === true,
         },
       });
       return;
@@ -274,10 +274,14 @@ function normalizedAuditOutcome(
 
 function outcomeCondition(outcome: string) {
   if (outcome === "allowed") {
-    return or(
-      eq(toolCallEvents.eventType, "call_completed"),
-      and(eq(toolCallEvents.eventType, "approval_resolved"), eq(toolCallEvents.outcome, "success")),
-      eq(toolCallEvents.decision, "allow"),
+    return and(
+      sql`${toolCallEvents.eventType} <> 'call_failed'`,
+      sql`${toolCallEvents.outcome} not in ('failure', 'timeout', 'cancelled')`,
+      or(
+        eq(toolCallEvents.eventType, "call_completed"),
+        and(eq(toolCallEvents.eventType, "approval_resolved"), eq(toolCallEvents.outcome, "success")),
+        eq(toolCallEvents.decision, "allow"),
+      ),
     );
   }
   if (outcome === "blocked" || outcome === "denied") {
