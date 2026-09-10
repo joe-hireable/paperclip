@@ -1,10 +1,9 @@
 ---
 name: paperclip-evidence-led-delivery
 description: >
-  Use for engineering, architecture, model routing and deployment through
-  Paperclip. Combines Spec Kit specifications and the AI-SDLC decision rubric
-  with bounded experiments, independent verification and explicit release
-  authority across harnesses.
+  Turn rough notes into verified work through Paperclip. Uses Spec Kit
+  specifications, AI-SDLC decisions, bounded experiments and independent checks,
+  with source context, clear permissions and shared delivery across harnesses.
 ---
 
 # Evidence-led delivery
@@ -22,6 +21,23 @@ release gates; record a later explicit authorisation and its scope rather than
 silently treating an old restriction as revoked everywhere.
 A later explicit authorisation governs within its stated scope; actions outside
 that scope remain restricted.
+
+## Start from rough input
+
+Accept notes, fragments and evolving instructions without asking the user to
+rewrite them. Preserve the source references and extract the intended outcome,
+workspace/project, priorities, constraints and evidence needed to accept delivery.
+Separate confirmed requirements from assumptions and unresolved facts. Reconcile
+new instructions with the existing contract; update only the affected decisions
+and tasks. Resolve reversible implementation choices autonomously. Ask only for
+missing information or authority that materially changes dependent work, and
+continue independent work while waiting.
+
+Use a specification for engineering work, or a concise brief and outcome checks
+for commercial or creative work. Do not force every request into a code project.
+Convert the accepted intent into native goals, plans and bounded tasks; route
+qualified specialist roles, verify their outputs, and return the delivered result
+with remaining limitations. A polished plan or a created task is not delivery.
 
 ## One contract, proportional to the work
 
