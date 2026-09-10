@@ -1,10 +1,10 @@
 ---
 name: paperclip-evidence-led-delivery
 description: >
-  Deliver software through Paperclip using Spec Kit specifications and the
-  AI-SDLC decision rubric, with bounded experiments, independent verification
-  and explicit release authority. Use for non-trivial engineering, architecture,
-  model routing, evaluation, optimisation and deployment work in any harness.
+  Use for engineering, architecture, model routing and deployment through
+  Paperclip. Combines Spec Kit specifications and the AI-SDLC decision rubric
+  with bounded experiments, independent verification and explicit release
+  authority across harnesses.
 ---
 
 # Evidence-led delivery
@@ -25,8 +25,9 @@ that scope remain restricted.
 
 ## One contract, proportional to the work
 
-Use the existing task's `plan` document and repository plan. Link their exact
-revisions; do not duplicate a backlog or regenerate settled plans. A small fix
+Use the task's canonical `plan` document and, when one already exists, the
+repository plan. Link their exact revisions; do not duplicate a backlog or
+regenerate settled plans. A small fix
 needs a reproduced fault, scoped correction and regression evidence, not a
 full feature specification. Existing accepted specifications remain valid.
 
