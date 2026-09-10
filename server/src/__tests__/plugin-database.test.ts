@@ -143,6 +143,8 @@ describe("plugin database SQL validation", () => {
     "UPDATE public.issues SET title = 'bad'",
     "DELETE FROM public.issues WHERE id = $1",
     "WITH removed AS (DELETE FROM public.issues RETURNING id) INSERT INTO plugin_test.rows (id) SELECT id FROM removed",
+    "WITH removed AS (DELETE FROM plugin_test.rows RETURNING id) INSERT INTO public.issues (id) SELECT id FROM removed",
+    "WITH removed AS (DELETE FROM plugin_test.rows RETURNING id) UPDATE public.issues SET title = 'bad' WHERE id IN (SELECT id FROM removed)",
     "UPDATE plugin_test.rows SET label = (WITH removed AS (DELETE FROM public.issues RETURNING title) SELECT title FROM removed)",
     "UPDATE plugin_test.rows SET label = (WITH removed AS (DELETE /* remove */ FROM ONLY public . issues RETURNING title) SELECT title FROM removed)",
     "UPDATE plugin_test.rows SET label = (WITH changed AS (UPDATE public.issues SET title = 'bad' RETURNING title) SELECT title FROM changed)",
@@ -266,7 +268,7 @@ describe("buildPluginWorkerEnv", () => {
 
   it("does not pass provider keys to non-environment plugins", () => {
     const env = buildPluginWorkerEnv({
-      manifest: { capabilities: ["ui.slots.register"] },
+      manifest: { capabilities: [] },
       instanceInfo,
       processEnv: {
         OPENAI_API_KEY: "openai-token",
@@ -680,6 +682,17 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
     await expect(
       pluginDb.execute(pluginId, "UPDATE public.issues SET title = $1", ["bad"]),
     ).rejects.toThrow(/plugin namespace/i);
+    const companyId = randomUUID(), rowId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Inverse CTE fixture", issuePrefix: "ICTE" });
+    await pluginDb.execute(pluginId, `INSERT INTO ${namespace}.notes (id, body) VALUES ($1, $2)`, [rowId, "retained"]);
+    await expect(pluginDb.execute(pluginId, `
+      WITH removed AS (DELETE FROM ${namespace}.notes WHERE id = $1 RETURNING id, body)
+      INSERT INTO public.issues (id, company_id, title) SELECT id, $2, body FROM removed
+    `, [rowId, companyId])).rejects.toThrow(/only allows INSERT, UPDATE, or DELETE/);
+    expect(await pluginDb.query(pluginId, `SELECT id, body FROM ${namespace}.notes WHERE id = $1`, [rowId]))
+      .toEqual([{ id: rowId, body: "retained" }]);
+    expect(await db.select({ id: issues.id }).from(issues).where(eq(issues.id, rowId))).toEqual([]);
+
     await expect(
       pluginDb.execute(pluginId, `UPDATE ${namespace}.notes SET body = 'bad' WHERE EXISTS (SELECT 1 FROM public.companies)`),
     ).rejects.toThrow(/whitelisted/i);
