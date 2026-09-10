@@ -2,10 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { PluginContext, PluginDatabaseClient } from "@paperclipai/plugin-sdk";
 import { applyCommand, emptyState, type Actor, type Command, type CompanyState } from "../src/domain.js";
 import type { TaskHead } from "../src/store.js";
-import { createOperations } from "../src/worker.js";
+import plugin, { createOperations } from "../src/worker.js";
 
-vi.mock("@paperclipai/plugin-sdk", () => ({
-  definePlugin: (plugin: unknown) => plugin,
+vi.mock("@paperclipai/plugin-sdk", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@paperclipai/plugin-sdk")>(),
   runWorker: vi.fn(),
 }));
 
@@ -53,7 +53,7 @@ function harness(state = initial()) {
   const ctx = { db, issues: { get: getIssue }, activity: { log: logActivity } } as unknown as PluginContext;
   const operations = createOperations(ctx);
   return {
-    query, execute, getIssue, logActivity,
+    query, execute, getIssue, logActivity, operations, ctx,
     changeTask(next: TaskHead | null) { currentHead = next; },
     loseConditionalWrite() { updateCount = 0; },
     run(command: Command, actor = board, expectedRevision = 3) {
@@ -63,6 +63,35 @@ function harness(state = initial()) {
 }
 
 describe("operations command integration", () => {
+  it.each([undefined, null, "3", -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN])("rejects invalid revision %j before reading or writing", async (expectedRevision) => {
+    const h = harness();
+    await expect(h.operations.command({ companyId: company, expectedRevision, command: snapshot }, board))
+      .rejects.toMatchObject({ code: "invalid_revision", status: 400 });
+    expect(h.query).not.toHaveBeenCalled();
+    expect(h.getIssue).not.toHaveBeenCalled();
+    expect(h.execute).not.toHaveBeenCalled();
+    expect(h.logActivity).not.toHaveBeenCalled();
+  });
+
+  it.each(["data", "api"])("reports invalid_task through the registered %s task-head path", async (path) => {
+    const h = harness();
+    const register = vi.fn();
+    await plugin.definition.setup!({ ...h.ctx, data: { register }, actions: { register: vi.fn() } } as unknown as PluginContext);
+    const handler = register.mock.calls.find(([name]) => name === "task-head")![1];
+    if (path === "data") {
+      await expect(async () => handler({ companyId: company, taskId: "bad-task" }))
+        .rejects.toMatchObject({ code: "invalid_task", status: 400 });
+    } else {
+      const response = await plugin.definition.onApiRequest!({
+        companyId: company, routeKey: "task-head", method: "GET", path: "/tasks/bad-task/context-head",
+        params: { taskId: "bad-task" }, query: {}, body: null, headers: {},
+        actor: { actorType: "user", actorId: board.id, userId: board.id },
+      });
+      expect(response).toMatchObject({ status: 400, body: { code: "invalid_task" } });
+    }
+    expect(h.query).not.toHaveBeenCalled();
+  });
+
   it("logs committed operations with the trusted actor and revision without copying policy contents", async () => {
     const h = harness(emptyState());
     await h.run(publish);
