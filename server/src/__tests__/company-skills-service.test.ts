@@ -843,7 +843,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       expect.objectContaining({ name: "Review", folderPath: "engineering/reviews" }),
     ]);
     await expect(svc.list(companyId, { folderId: engineering.id })).resolves.toEqual([]);
-    await expect(svc.list(companyId, { folderId: engineering.id, q: deploymentSkillName })).resolves.toEqual([
+    await expect(svc.list(companyId, { folderId: engineering.id, q: deploymentSkillName.toLowerCase().slice(0, -1) })).resolves.toEqual([
       expect.objectContaining({ name: deploymentSkillName, folderPath: "operations" }),
     ]);
     const review = (await svc.list(companyId)).find((skill) => skill.name === "Review");
