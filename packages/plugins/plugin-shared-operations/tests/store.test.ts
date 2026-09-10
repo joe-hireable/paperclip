@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PluginDatabaseClient } from "@paperclipai/plugin-sdk";
 import { emptyState } from "../src/domain.js";
 import { companyId, createStore } from "../src/store.js";
@@ -48,6 +48,12 @@ describe("company persistence", () => {
     const store = createStore(database());
     await expect(store.save(a, undefined, emptyState())).rejects.toMatchObject({ code: "invalid_revision" });
     await expect(store.save(a, -1, emptyState())).rejects.toMatchObject({ code: "invalid_revision" });
+  });
+  it.each(["", "not-a-task"])("identifies malformed task input %j without querying", async (task) => {
+    const db = database();
+    const query = vi.spyOn(db, "query");
+    await expect(createStore(db).taskHead(a, task)).rejects.toMatchObject({ code: "invalid_task", status: 400 });
+    expect(query).not.toHaveBeenCalled();
   });
   it("rejects oversized history rather than discarding it", async () => {
     const state = emptyState();
