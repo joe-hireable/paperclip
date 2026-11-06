@@ -79,6 +79,7 @@ export interface HeartbeatExecutionConfigurationInput {
     "trustPreset" | "useIsolatedTaskDirectory" | "requestedExecutionWorkspaceMode"> & { explicitTaskDirectory: boolean };
   environment: Pick<EnvironmentSelection,
     "selectedEnvironmentId" | "selectedEnvironmentForConfig" | "resolvedInstanceSettings" | "persistedNativeExecutionInput">;
+  executionBinding?: import("@paperclipai/shared/execution-bindings").ExecutionBindingSnapshot | null;
   services: {
     secretsSvc: Parameters<typeof resolveExecutionRunAdapterConfig>[0]["secretsSvc"];
     companySkills: Pick<ReturnType<typeof companySkillService>, "withRuntimeSkillEntries">;
@@ -184,6 +185,7 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
 
   const { resolvedConfig, configuredTaskEnvironment, secretKeys, secretManifest } =
     await time("configuration_secrets", () => resolveExecutionRunAdapterConfig({
+      executionBinding: input.executionBinding,
       managedAiCredentials: Boolean(aiBinding),
       managedGitHubCredentials: !useHostGitHub,
       companyId: agent.companyId,

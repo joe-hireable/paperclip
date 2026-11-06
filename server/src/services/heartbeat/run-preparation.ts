@@ -1,3 +1,5 @@
+import { assertExecutionBindingConfig } from "../execution-bindings.js";
+import type { ExecutionBindingSnapshot } from "@paperclipai/shared/execution-bindings";
 import { skillPackageStore, skillVersionMetadataColumns } from "../skill-package-store.js";
 import { skillAccessService } from "../skill-access.js";
 import { buildReviewPathRecoveryDisposition } from "../recovery/review-path-recovery.js";
@@ -313,6 +315,7 @@ function assertLowTrustEnvConfigAllowed(envValue: unknown, source: string) {
 export async function resolveExecutionRunAdapterConfig(input: {
   managedAiCredentials?: boolean;
   companyId: string;
+  executionBinding?: ExecutionBindingSnapshot | null;
   agentId?: string | null;
   adapterType?: string | null;
   issueId?: string | null;
@@ -599,6 +602,9 @@ export async function resolveExecutionRunAdapterConfig(input: {
       ...input.trustedEnvProjection,
     };
     for (const key of input.trustedEnvSecretKeys ?? []) secretKeys.add(key);
+  }
+  if (input.executionBinding) {
+    assertExecutionBindingConfig(input.executionBinding, resolvedConfig, process.env);
   }
   // Pre-dispatch credential gate for codex_local: a managed Codex home with no
   // usable auth.json and an empty OPENAI_API_KEY would dispatch a run that

@@ -225,7 +225,12 @@ export async function terminateHeartbeatRunProcess(input: {
   processGroupId: number | null | undefined;
   graceMs?: number;
   signal?: NodeJS.Signals;
+  signalOwnedGroup?: (signal: NodeJS.Signals) => Promise<{ status: "gone"; forceKilled: boolean }>;
 }) {
+  if (input.signalOwnedGroup) {
+    await input.signalOwnedGroup(input.signal ?? "SIGTERM");
+    return;
+  }
   const pid = input.pid ?? null;
   const processGroupId = input.processGroupId ?? null;
   if (typeof pid !== "number" && typeof processGroupId !== "number") return;
@@ -1502,6 +1507,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
                   running.graceSec,
                   options.terminationGraceMs,
                 ),
+                signalOwnedGroup: running.signalOwnedGroup,
               });
             }
             terminationSettled = true;
@@ -1510,7 +1516,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
               (!processCancellationSettlement || terminationSettled) &&
               runningProcesses.get(run.id) === running
             ) {
-              runningProcesses.delete(run.id);
+              if (!running?.signalOwnedGroup || terminationSettled) runningProcesses.delete(run.id);
             }
           }
 

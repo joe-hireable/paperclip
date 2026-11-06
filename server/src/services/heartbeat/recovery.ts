@@ -144,6 +144,7 @@ export interface HeartbeatRecoveryDependencies extends Pick<HeartbeatRetryDepend
     pid: number | null | undefined;
     processGroupId: number | null | undefined;
     graceMs?: number;
+    signalOwnedGroup?: (signal: NodeJS.Signals) => Promise<{ status: "gone"; forceKilled: boolean }>;
   }) => Promise<void>;
   setRunStatus: (runId: string, status: string, patch?: Partial<typeof heartbeatRuns.$inferInsert>) => Promise<HeartbeatRun | null>;
   setRunStatusFromLive: (runId: string, status: string, fromStatuses: string[], patch?: Partial<typeof heartbeatRuns.$inferInsert>) => Promise<{
@@ -1251,14 +1252,23 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
           });
         }
         if (running && !control) {
-          await terminateHeartbeatRunProcess({
-            pid: running.child.pid,
-            processGroupId: running.processGroupId,
-            graceMs: Math.max(1, running.graceSec) * 1000,
-          });
+          let ownedCleanupComplete = false;
+          try {
+            await terminateHeartbeatRunProcess({
+              pid: running.child.pid,
+              processGroupId: running.processGroupId,
+              graceMs: Math.max(1, running.graceSec) * 1000,
+              signalOwnedGroup: running.signalOwnedGroup,
+            });
+            ownedCleanupComplete = true;
+          } finally {
+            if (!running?.signalOwnedGroup || ownedCleanupComplete) {
+              if (runningProcesses.get(run.id) === running) runningProcesses.delete(run.id);
+            }
+          }
         }
       } finally {
-        if (!control && runningProcesses.get(run.id) === running) runningProcesses.delete(run.id);
+        if (!running && !control && runningProcesses.get(run.id) === running) runningProcesses.delete(run.id);
       }
 
       const persistedCancellationResult =

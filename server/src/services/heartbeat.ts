@@ -425,6 +425,10 @@ import {
 import {
   secretService,
 } from "./secrets.js";
+import { assertExecutionBindingConfig, ExecutionBindingError, executionBindingService } from "./execution-bindings.js";
+import type { ExecutionBindingSnapshot } from "@paperclipai/shared/execution-bindings";
+import { assertStaticIntelligentRoutingDelivery, IntelligentRoutingRuntimeError } from "./intelligent-routing-runtime.js";
+import { IntelligentRoutingContractError } from "./intelligent-routing-contracts.js";
 import {
   resolveDefaultAgentWorkspaceDir,
 } from "../home-paths.js";
@@ -955,6 +959,7 @@ export function heartbeatService(
 
   const runLogStore = getRunLogStore();
   const traceStore = providerTraceStore(db);
+  const executionBindingsSvc = executionBindingService(db);
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
@@ -1985,6 +1990,8 @@ export function heartbeatService(
 
     if (run.runtimeMode === "legacy" && run.controllerBootId &&
         run.controllerBootId !== legacyControllerBootId) return;
+    let executionBinding: ExecutionBindingSnapshot | null = null;
+    let boundAdapterStarted = false;
     activeRunExecutions.add(run.id);
     const timePreparation = createHeartbeatPreparationTiming(run.id);
     const executionControl = createAdapterExecutionControl();
@@ -2111,6 +2118,10 @@ export function heartbeatService(
         await releaseIssueExecutionAndPromote(resetRun, { suppressImmediateRecovery: true });
         await finalizeAgentStatus(agent.id, "succeeded");
         return;
+      }
+      executionBinding = await executionBindingsSvc.acquire(run, agent);
+      if (executionBinding) {
+        agent = { ...agent, adapterType: executionBinding.binding.adapterType, adapterConfig: executionBinding.adapterConfig };
       }
       const runtime = await timePreparation("runtime_state", () => ensureRuntimeState(agent));
       const context = parseObject(run.contextSnapshot);
@@ -2715,6 +2726,7 @@ export function heartbeatService(
       let nativeChatExpectedCwd = selectedNativeChatExpectedCwd;
       const executionConfiguration = await timePreparation("execution_configuration", () => prepareHeartbeatExecutionConfiguration(db, {
         run, agent,
+        executionBinding,
         task: { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext, pinnedSkillTest },
         config: { sourceWorkspaceConfig, aiBinding },
         policy: { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory, requestedExecutionWorkspaceMode },
@@ -3516,6 +3528,7 @@ export function heartbeatService(
             cancelRunInternal,
             enqueueWakeup,
             persistRunProcessMetadata: async (processRunId, meta) => {
+              await executionBindingsSvc.recordProcess(processRunId, meta);
               if (!issueId || (executionTarget && executionTarget.kind !== "local")) {
                 return persistRunProcessMetadata(processRunId, meta);
               }
@@ -4022,6 +4035,14 @@ export function heartbeatService(
             payload: { phase: "task.run.measured", durationMs: Date.now() - (latestRun.startedAt ?? latestRun.createdAt).getTime(),
               outcome: latestRun.status, durableSettlement: true } }).catch(error => logger.warn({ runId: run.id, error }, "Could not record terminal run duration"));
         }
+      if (executionBinding && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled) {
+        const child = runningProcesses.get(run.id)?.child;
+        await executionBindingsSvc.releaseAfterExecution({
+          companyId: run.companyId, runId: run.id, adapterStarted: boundAdapterStarted,
+          isProcessAlive, isProcessGroupAlive,
+          hasActiveChild: !!child && child.exitCode === null && child.signalCode === null,
+        }).catch((error) => logger.error({ error, runId: run.id }, "Account reservation retained: process reconciliation failed"));
+      }
       } finally {
         controllerLease.stop();
         activeRunExecutions.delete(run.id);

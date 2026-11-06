@@ -1,3 +1,6 @@
+import { ExecutionBindingError } from "../execution-bindings.js";
+import { IntelligentRoutingRuntimeError } from "../intelligent-routing-runtime.js";
+import { IntelligentRoutingContractError } from "../intelligent-routing-contracts.js";
 import { preserveAcceptedRunUsageProjectionSql } from "../usage-receipts.js";
 import { isContextCompactionRun } from "../context-compaction.js";
 import { providerFailureFromError } from "../../vendor/paperclip-runner/index.js";
@@ -303,10 +306,34 @@ function isConfigurationIncompleteFailure(
   return error instanceof ConfigurationIncompleteFailure;
 }
 
+const STATIC_ROUTING_ADAPTER_FAILURE_CODES = new Set([
+  "intelligent_routing_delivery_mode_unsupported",
+  "intelligent_routing_dynamic_delivery_denied",
+  "intelligent_routing_remote_delivery_denied",
+  "intelligent_routing_instructions_unavailable",
+  "intelligent_routing_runtime_static_harness_unqualified",
+]);
+
+function staticRoutingAdapterFailureCode(error: unknown): string | null {
+  if (!(error instanceof Error) || !("code" in error)) return null;
+  const code = (error as Error & { code?: unknown }).code;
+  return typeof code === "string" && STATIC_ROUTING_ADAPTER_FAILURE_CODES.has(code)
+    ? code
+    : null;
+}
+
+export function executionBindingOrRoutingErrorCode(err: unknown): string | null {
+  if (err instanceof ExecutionBindingError || err instanceof IntelligentRoutingRuntimeError || err instanceof IntelligentRoutingContractError) return (err as { code: string }).code;
+  return staticRoutingAdapterFailureCode(err);
+}
+
 export function isConfigurationIncompleteFailedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
 ) {
   return (
+    run?.errorCode?.startsWith("execution_binding_") === true ||
+    run?.errorCode?.startsWith("intelligent_routing_") === true ||
+    run?.errorCode?.startsWith("routing_contract_") === true ||
     run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE ||
     run?.errorCode === "model_not_found"
   );
@@ -1124,6 +1151,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       })
       .catch(() => null);
     const failureErrorCode =
+      executionBindingOrRoutingErrorCode(err) ??
       workspaceValidationFailure?.code ??
       configurationIncompleteFailure?.code ??
       nonRetryablePreflightFailureCode(err) ??
@@ -1266,7 +1294,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         // exhaustion. Once its durable coordinator has classified a
         // terminal failure, generic issue recovery must not create a
         // replacement retryOfRunId chain for the same provider work.
-        suppressImmediateRecovery: nativeTerminalFailureCode !== null,
+        suppressImmediateRecovery: nativeTerminalFailureCode !== null || isConfigurationIncompleteFailedRun(livenessRun),
       });
       await handleIssueReviewPathDisposition(livenessRun);
 
@@ -1390,6 +1418,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const runnerRevisionMismatch = !providerDispatchStarted && run.runtimeMode === "legacy"
       && run.nativeSessionId === null && run.runnerInstanceId === null && isRunnerRevisionMismatch(outerErr);
     const setupFailureErrorCode =
+      executionBindingOrRoutingErrorCode(outerErr) ??
       (controllerLeaseLost ? CONTROLLER_LEASE_LOST_FAILURE_CODE : null) ??
       remoteWorkspacePreparationTimeout?.code ??
       reusableSandboxResumeFailure?.code ??
@@ -1578,6 +1607,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       }
       await releaseIssueExecutionAndPromote(livenessRun, {
         suppressImmediateRecovery:
+          isConfigurationIncompleteFailedRun(livenessRun) ||
           readNonEmptyString(
             parseObject(livenessRun.contextSnapshot).goalControlRequestId,
           ) !== null ||
