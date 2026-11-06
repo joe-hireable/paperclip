@@ -468,6 +468,7 @@ type HeaderPolicySummary = {
 
 type RemoteHttpExecutionResult = {
   result: unknown;
+  isError: boolean;
   headerSummary?: HeaderPolicySummary;
   execution?: RemoteHttpExecutionAudit;
 };
@@ -815,6 +816,22 @@ function summarizeResult(result: unknown): Record<string, unknown> {
     hasData: record.data !== undefined,
     hasError: Boolean(record.error),
   };
+}
+
+function mcpToolFailure(execution: RemoteHttpExecutionResult | null, summary: ReturnType<typeof summarizeResult>) {
+  if (!execution?.isError) return null;
+  let message = summary.summary as string;
+  try {
+    const result = asRecord(JSON.parse(message));
+    if (typeof result?.content === "string") message = result.content;
+  } catch {
+    // A truncated summary still contains a safe diagnostic.
+  }
+  return { errorCode: "mcp_tool_error", errorMessage: message || "MCP tool returned an error result" };
+}
+
+function isStoredMcpToolFailure(invocation: typeof toolInvocations.$inferSelect) {
+  return invocation.status === "failed" && invocation.errorCode === "mcp_tool_error";
 }
 
 function inferToolRisk(toolName: string): ToolGatewayDescriptor["risk"] {
@@ -2297,6 +2314,7 @@ export function createToolGatewayService(
     const metadata = input.tool ? toolAuditMetadata(input.tool) : {};
     await db.insert(toolCallEvents).values({
       companyId: input.session.companyId,
+      gatewayId: input.session.gatewayId ?? null,
       invocationId: input.invocationId ?? null,
       actionRequestId: input.actionRequestId ?? null,
       eventType: input.eventType,
@@ -6213,7 +6231,7 @@ export function createToolGatewayService(
         (url, init) => options.remoteHttpRequest ? options.remoteHttpRequest(url, init)
           : guardedRemoteHttpFetch(url, init, remoteHttpFetchOptions()), signal, deadlineAt);
       const data = await client.invoke(entry.toolName, parameters);
-      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } } };
+      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } }, isError: false };
     }
     const nativeProvider = nativeProviderCatalogFor(connection);
     if (nativeProvider) {
@@ -6225,11 +6243,11 @@ export function createToolGatewayService(
         request: (url, init) => options.remoteHttpRequest ? options.remoteHttpRequest(url, init)
           : guardedRemoteHttpFetch(url, init, remoteHttpFetchOptions()),
         toolName: entry.toolName, parameters, signal, deadlineAt });
-      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } } };
+      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } }, isError: false };
     }
     if (isBrowserUseConnection(connection)) {
       const data = await browserUseService(db, options.remoteHttpRequest).execute(session, grant, invocationId!, entry.toolName, parameters);
-      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } } };
+      return { result: { content: JSON.stringify(data), data: { structuredContent: data, transport: "rest_api" } }, isError: false };
     }
     const workspaceTarget = connection.config.sourceTemplateKey === "google-workspace"
       ? googleWorkspaceToolTarget(entry.toolName) : null;
@@ -6345,8 +6363,10 @@ export function createToolGatewayService(
         const data = await client.call(entry.toolName, parameters);
         const record = asRecord(data);
         const failedCommand = entry.toolName === `${RAILWAY_TOOL_PREFIX}run-command` && (record?.exitCode !== 0 || record?.timedOut === true || record?.truncated === true);
+        const railwayResult = normalizeMcpToolResult({ content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: failedCommand }, "mcp_http", entry.toolName === `${RAILWAY_TOOL_PREFIX}run-command`, "railway");
         return {
-          result: normalizeMcpToolResult({ content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: failedCommand }, "mcp_http", entry.toolName === `${RAILWAY_TOOL_PREFIX}run-command`, "railway"),
+          result: railwayResult,
+          isError: railwayResult.data.isError,
           headerSummary,
           execution,
         };
@@ -6608,7 +6628,7 @@ export function createToolGatewayService(
         "ok",
         "Remote MCP server responded to tools/call.",
       );
-      return { result, headerSummary, execution };
+      return { result, isError: result.data.isError, headerSummary, execution };
     } catch (error) {
       if (error instanceof McpHttpResponseError) {
         const failure = error.reason === "too_large" ? responseTooLargeError()
@@ -6717,9 +6737,8 @@ export function createToolGatewayService(
         return invoke();
       },
     );
-    return {
-      result: normalizeMcpToolResult(result, template.templateId === "paperclip.cognee-cloud" ? "cognee_cloud" : "local_stdio", template.templateId !== "paperclip.cognee-cloud"),
-    };
+    const normalized = normalizeMcpToolResult(result, template.templateId === "paperclip.cognee-cloud" ? "cognee_cloud" : "local_stdio", template.templateId !== "paperclip.cognee-cloud");
+    return { result: normalized, isError: normalized.data.isError };
   }
 
   async function runWithTimeout<T>(
