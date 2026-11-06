@@ -21,13 +21,6 @@ import {
   agentWakeupRequests,
   issues,
   heartbeatRuns,
-<<<<<<< upstream+partial-joe
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  heartbeatRunEvents,
-+++ joe:
-  executionBindings,
->>>>>>> joe
   costEvents,
 } from "@paperclipai/db";
 import { removeReleasedRunExecutionBindings } from "./execution-bindings.js";
@@ -554,24 +547,7 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
       return result.company;
     },
 
-<<<<<<< upstream+partial-joe
     remove: (id: string) => deleteCompany(db, id),
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        const companyRunIds = await tx
-          .select({ id: heartbeatRuns.id })
-          .from(heartbeatRuns)
-          .where(eq(heartbeatRuns.companyId, id));
-
-        await tx.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.companyId, id));
-        if (companyRunIds.length > 0) {
-+++ joe:
-          .where(eq(heartbeatRuns.companyId, id))
-          .for("update");
-
-        await removeReleasedRunExecutionBindings(tx as unknown as Db, id, companyRunIds.map((run) => run.id));
-        await tx.delete(executionBindings).where(eq(executionBindings.companyId, id));
->>>>>>> joe
 
     stats: () =>
       Promise.all([

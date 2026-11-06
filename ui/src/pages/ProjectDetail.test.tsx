@@ -9,7 +9,6 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectDetail } from "./ProjectDetail";
-import { queryKeys } from "../lib/queryKeys";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -40,7 +39,6 @@ const mockParams = vi.hoisted(() => ({ projectId: "project-1" }));
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
 const mockIssuesList = vi.hoisted(() => vi.fn());
 const mockSummarySlotCard = vi.hoisted(() => vi.fn());
-const mockParams = vi.hoisted(() => ({ projectId: "project-1" }));
 const mockLocation = vi.hoisted(() => ({
   pathname: "/projects/project-1/plugin-operations",
   search: "",

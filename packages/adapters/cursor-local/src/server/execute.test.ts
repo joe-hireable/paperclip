@@ -217,6 +217,7 @@ exit 7
 
   it("dispatches a restricted binding with ask mode, sandbox and the exact isolated profile", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-cursor-restricted-"));
+    try {
       const command = path.join(root, "agent");
       await fs.writeFile(command, `#!/bin/sh
 cat > /dev/null
@@ -231,6 +232,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"review complete"}
       }));
       const ctx: AdapterExecutionContext = {
         runId: "restricted-cursor", agent: { id: "agent", companyId: "company", name: "Reviewer", adapterType: "cursor", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
         config: { cwd: root, command, timeoutSec: 10, model: "claude-opus-5", executionBindingMode: "read_only", env: {
           XDG_CONFIG_HOME: `${root}/auth`, CURSOR_CONFIG_DIR: `${root}/config`, CURSOR_DATA_DIR: `${root}/data`,
         } }, context: {}, onLog: async () => {}, onSpawn: async () => {},
@@ -247,6 +249,8 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"review complete"}
         await expect(execute({ ...ctx, config: { ...ctx.config, ...extra } })).rejects.toThrow("restricted");
       }
       await expect(execute({ ...ctx, executionTarget: { kind: "remote", transport: "sandbox", remoteCwd: root, runner: { execute: async () => { throw new Error("must not dispatch"); } } } })).rejects.toThrow("restricted");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 

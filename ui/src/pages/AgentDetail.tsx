@@ -41,7 +41,6 @@ import { copyTextToClipboard } from "../lib/clipboard";
 import { AgentSkillsTab } from "./agent-skills/AgentSkillsTab";
 import { AgentConfigForm } from "../components/AgentConfigForm";
 import { agentDisplayAdapterType, getAdapterDisplay } from "../adapters/adapter-display-registry";
-import { assertUnboundRunRestart, ExecutionBindingRunDetails, executionBindingQueryOptions } from "../components/ExecutionBindingRunDetails";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { useAdapterCapabilities } from "@/adapters/use-adapter-capabilities";
@@ -2922,8 +2921,6 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
     ),
   });
   const run = hydratedRun ?? initialRun;
-  const executionBindingQuery = useQuery(executionBindingQueryOptions(run.companyId, run.id, run.status));
-  const canRestartNativeSession = executionBindingQuery.isSuccess && executionBindingQuery.data === null;
   const { data: boardAccess } = useQuery({
     queryKey: queryKeys.access.currentBoardAccess,
     queryFn: () => accessApi.getCurrentBoardAccess(),
@@ -2999,7 +2996,6 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
   }, [run.contextSnapshot, run.id]);
   const resumeRun = useMutation({
     mutationFn: async () => {
-      await assertUnboundRunRestart(run.companyId, run.id);
       const result = await agentsApi.wakeup(run.agentId, {
         source: "on_demand",
         triggerDetail: "manual",
@@ -3033,16 +3029,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
   }, [run.contextSnapshot]);
   const retryRun = useMutation({
     mutationFn: async () => {
-<<<<<<< upstream+partial-joe
       return agentsApi.retryFailedRun(run.agentId, run.id, run.companyId);
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      const result = await agentsApi.wakeup(run.agentId, {
-        source: "on_demand",
-        triggerDetail: "manual",
-+++ joe:
-      await assertUnboundRunRestart(run.companyId, run.id);
->>>>>>> joe
     },
     onSuccess: (newRun) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(run.companyId, run.agentId) });
@@ -3054,7 +3041,6 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
 
   const rerunWithTrace = useMutation({
     mutationFn: async () => {
-      await assertUnboundRunRestart(run.companyId, run.id);
       const result = await agentsApi.wakeup(run.agentId, {
         source: "on_demand",
         triggerDetail: "manual",
@@ -3168,7 +3154,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                   size="sm"
                   className="text-xs h-6 px-2"
                   onClick={() => resumeRun.mutate()}
-                  disabled={resumeRun.isPending || !canRestartNativeSession}
+                  disabled={resumeRun.isPending}
                 >
                   <RotateCcw className="h-3.5 w-3.5 mr-1" />
                   {resumeRun.isPending ? "Resuming…" : "Resume"}
@@ -3180,7 +3166,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                   size="sm"
                   className="text-xs h-6 px-2"
                   onClick={() => retryRun.mutate()}
-                  disabled={retryRun.isPending || !canRestartNativeSession}
+                  disabled={retryRun.isPending}
                 >
                   <RotateCcw className="h-3.5 w-3.5 mr-1" />
                   {retryRun.isPending ? "Retrying…" : "Retry"}
@@ -3205,7 +3191,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                   size="sm"
                   className="text-xs h-6 px-2"
                   onClick={() => rerunWithTrace.mutate()}
-                  disabled={rerunWithTrace.isPending || !canRestartNativeSession}
+                  disabled={rerunWithTrace.isPending}
                 >
                   <RotateCcw className="h-3.5 w-3.5 mr-1" />
                   {rerunWithTrace.isPending ? "Starting…" : "Re-run with provider trace"}
@@ -3214,7 +3200,6 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
             </div>
             {/* Adapter type · provider · model */}
             {(() => {
-              if (!canRestartNativeSession) return null;
               const displayProvider = metrics.provider
                 ?? asNonEmptyString(adapterConfig?.provider);
               const displayModel = metrics.model
@@ -3479,13 +3464,6 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
         return <SourceResolvedFoldCallout fold={fold} finalizedAt={run.finishedAt} />;
       })()}
 
-      <ExecutionBindingRunDetails
-        record={executionBindingQuery.data}
-        runStatus={run.status}
-        taskId={getRunSnapshotIssueId(run)}
-        loading={executionBindingQuery.isPending}
-        failed={executionBindingQuery.isError}
-      />
       {/* Log viewer */}
       <LogViewer run={run} adapterType={adapterType} />
       <ScrollToBottom />
@@ -3495,14 +3473,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
         open={inspectorOpen}
         onOpenChange={setInspectorOpen}
         onRerunWithTrace={
-<<<<<<< upstream+partial-joe
           canRerunWithProviderTrace && !["queued", "running"].includes(run.status)
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-          canUseProviderTrace && !["queued", "running"].includes(run.status)
-+++ joe:
-          canUseProviderTrace && canRestartNativeSession && !["queued", "running"].includes(run.status)
->>>>>>> joe
             ? () => rerunWithTrace.mutate()
             : undefined
         }

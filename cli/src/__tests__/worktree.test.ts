@@ -1670,7 +1670,6 @@ describe("worktree helpers", () => {
       const sourceEnvPath = path.join(sourceConfigDir, ".env");
       const sourceKeyPath = path.join(sourceConfigDir, "secrets", "master.key");
       const worktreeHome = path.join(tempRoot, ".paperclip-worktrees");
-<<<<<<< upstream+partial-joe
       const sourceCluster = await startEmbeddedPostgresTestDatabase("paperclip-worktree-auth-source-");
       const sourceUrl = new URL(sourceCluster.connectionString);
       sourceUrl.pathname = "/lagging_source";
@@ -1696,14 +1695,6 @@ describe("worktree helpers", () => {
       for (const entry of priorEntries) {
         fs.copyFileSync(new URL(`${entry.tag}.sql`, migrationsRoot), path.join(priorMigrations, `${entry.tag}.sql`));
       }
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      const sourceDb = await startEmbeddedPostgresTestDatabase("paperclip-worktree-auth-source-");
-      onTestFinished(() => sourceDb.cleanup());
-
-      await seedValidWorktreeSource(sourceDb.connectionString);
-+++ joe:
->>>>>>> joe
       const sourceDbClient = createDb(sourceDb.connectionString);
       await migrate(drizzle(sourceDbClient.$client), { migrationsFolder: priorMigrations });
       const seed = await seedValidWorktreeSource(sourceDb.connectionString);

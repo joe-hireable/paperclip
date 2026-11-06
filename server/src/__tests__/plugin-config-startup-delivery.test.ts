@@ -171,7 +171,7 @@ describeEmbeddedPostgres("registry.listConfigs (startup config delivery)", () =>
         });
         runWorker(plugin, import.meta.url);
       `);
-      await db.update(plugins).set({ packagePath: packageRoot, packageName: "@paperclipai/config-replay-fixture", manifestJson: manifest, status: "ready" }).where(eq(plugins.id, pluginId));
+      await db.update(plugins).set({ packagePath: packageRoot, packageName: "@paperclipai/config-replay-fixture", manifestJson: manifest as never, status: "ready" }).where(eq(plugins.id, pluginId));
       await registry.upsertConfig(pluginId, companyId, { companyId, configJson: { enabled: true, revision: 1 } });
       const loader = pluginLoader(db, { enableLocalFilesystem: false, enableNpmDiscovery: false }, {
         workerManager,

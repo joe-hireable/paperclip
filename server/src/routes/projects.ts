@@ -38,18 +38,11 @@ import { accessService, projectService, logActivity, workspaceOperationService }
 import { conflict, forbidden, unprocessable } from "../errors.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-<<<<<<< upstream+partial-joe
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { ensureProjectAccessMember } from "../services/projects.js";
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-import { assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
-+++ joe:
-import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { issueService } from "../services/issues.js";
 import { projectCoordinationPolicyService } from "../services/project-coordination-policy.js";
 import { projectConversationService } from "../services/project-conversations.js";
->>>>>>> joe
 import {
   buildWorkspaceRuntimeDesiredStatePatch,
   listConfiguredRuntimeServiceEntries,

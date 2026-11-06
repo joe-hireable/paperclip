@@ -107,6 +107,7 @@ describe("setupLiveEventsWebSocketServer", () => {
   });
 
   it.each(["bearer", "query"])("rejects approval-reader %s credentials before WebSocket upgrade", async (transport) => {
+    const server = new EventEmitter();
     const update = vi.fn(() => ({ set: () => ({ where: async () => [] }) }));
     const db = {
       select: () => ({ from: () => ({ where: async () => [{
@@ -117,10 +118,14 @@ describe("setupLiveEventsWebSocketServer", () => {
     };
     const wss = setupLiveEventsWebSocketServer(server as never, db as never, { deploymentMode: "local_trusted" });
     const upgrade = vi.spyOn(wss, "handleUpgrade").mockImplementation(() => {});
+    const socket = new FakeUpgradeSocket();
     const req = createUpgradeRequest(transport === "bearer"
       ? { headers: { authorization: "Bearer pcp_owned_synthetic_reader" } }
       : { url: "/api/companies/company-1/events/ws?token=pcp_owned_synthetic_reader" });
+    try {
       server.emit("upgrade", req, socket as unknown as Duplex, Buffer.alloc(0));
+      await flushPromises();
+      await flushPromises();
       expect(socket.endedChunks[0]).toContain("403 Forbidden");
       expect(upgrade).not.toHaveBeenCalled();
       expect(update).not.toHaveBeenCalled();
@@ -128,6 +133,7 @@ describe("setupLiveEventsWebSocketServer", () => {
   });
 
   it.each([null, { kind: "standard" }])("preserves WebSocket access for the existing key scope %j", async (scopeConfig) => {
+    const server = new EventEmitter();
     const db = {
       select: () => ({ from: () => ({ where: async () => [{
         id: "owned-standard-key", companyId: "company-1", agentId: "owned-standard-agent", scopeConfig,
@@ -136,8 +142,12 @@ describe("setupLiveEventsWebSocketServer", () => {
     };
     const wss = setupLiveEventsWebSocketServer(server as never, db as never, { deploymentMode: "authenticated" });
     const upgrade = vi.spyOn(wss, "handleUpgrade").mockImplementation(() => {});
+    const socket = new FakeUpgradeSocket();
+    try {
       server.emit("upgrade", createUpgradeRequest({ headers: { authorization: "Bearer pcp_owned_synthetic_standard" } }), socket as unknown as Duplex, Buffer.alloc(0));
+      await flushPromises();
       expect(upgrade).toHaveBeenCalledTimes(1);
+      expect(socket.endedChunks).toEqual([]);
     } finally { (wss as unknown as EventEmitter).emit("close"); }
   });
 

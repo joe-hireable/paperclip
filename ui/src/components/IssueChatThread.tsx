@@ -1,4 +1,3 @@
-<<<<<<< upstream+partial-joe
 import { useCurrentAccountGuard } from "../hooks/useAccountBoundMutation";
 import { resolveIssueChatHumanAuthor } from "@/lib/issue-chat-human-author";
 import { useCurrentWorkspaceRetry, useWorkspaceBaseRefRecovery, useWorkspaceRetry } from "./WorkspaceBaseRefRecovery";
@@ -13,14 +12,6 @@ import { ComposerAddMenu, ComposerModeChip } from "./task-chat/ComposerAddMenu";
 import { TaskChatPausedTakeover, type TaskComposerPause } from "./task-chat/TaskChatPausedTakeover";
 import { useEmailComment } from "./EmailMessageCard";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-import {
-  AssistantRuntimeProvider,
-  useAui,
-+++ joe:
-import { PendingIntakeError } from "../lib/use-master-intake";
->>>>>>> joe
 import type {
   ReasoningMessagePart,
   TextMessagePart,
@@ -541,7 +532,6 @@ interface IssueChatComposerProps {
   onImageUpload?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<IssueAttachment | void>;
   draftKey?: string;
-  masterIntake?: boolean;
   enableReassign?: boolean;
   reassignOptions?: InlineEntityOption[];
   currentAssigneeValue?: string;
@@ -658,7 +648,6 @@ interface IssueChatThreadProps {
   imageUploadHandler?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<IssueAttachment | void>;
   draftKey?: string;
-  masterIntake?: boolean;
   enableReassign?: boolean;
   reassignOptions?: InlineEntityOption[];
   currentAssigneeValue?: string;
@@ -4709,7 +4698,6 @@ function areIssueChatMessageRowPropsEqual(
   return true;
 }
 
-<<<<<<< upstream+partial-joe
 const IssueChatComposer = forwardRef<
   IssueChatComposerHandle,
   IssueChatComposerProps
@@ -4759,26 +4747,6 @@ const IssueChatComposer = forwardRef<
   // Initialize before StrictMode's mount cleanup can flush an empty value over
   // the stored draft. The effect below handles subsequent task-key changes.
   const [body, setBody] = useState(() => (draftKey ? loadDraft(draftKey) : ""));
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  onWorkModeChange,
-}, forwardedRef) {
-  const api = useAui();
-  const [body, setBody] = useState("");
-+++ joe:
-  const [body, setBody] = useState(() => masterIntake && draftKey ? loadDraft(draftKey) : "");
-  const bodyRef = useRef(body);
-  bodyRef.current = body;
---- base ctx:
-  onImageUpload,
-  onAttachImage,
-  draftKey,
-  enableReassign = false,
-  reassignOptions = [],
-  currentAssigneeValue = "",
-+++ joe:
-  masterIntake = false,
->>>>>>> joe
   const [submitting, setSubmitting] = useState(false);
   const [uncertainSubmission, setUncertainSubmission] =
     useState<ComposerDraftSubmission | null>(() =>
@@ -5063,16 +5031,8 @@ const IssueChatComposer = forwardRef<
       if (draftTimer.current) clearTimeout(draftTimer.current);
       if (draftKey && retiredDraftKeyRef.current !== draftKey && !submittingRef.current)
         saveDraft(draftKey, bodyRef.current);
-      if (masterIntake && draftKey) saveDraft(draftKey, bodyRef.current);
     };
-<<<<<<< upstream+partial-joe
   }, [draftKey]);
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  }, []);
-+++ joe:
-  }, [masterIntake, draftKey]);
->>>>>>> joe
 
   useEffect(() => {
     if (!draftKey) return;
@@ -5130,20 +5090,12 @@ const IssueChatComposer = forwardRef<
     )
       return;
 
-<<<<<<< upstream+partial-joe
     const composerHasAssigneePicker =
       enableReassign && reassignOptions.length > 0;
     if (
       composerHasAssigneePicker &&
       isUnassignedReassignValue(reassignTarget)
     ) {
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    const composerHasAssigneePicker = enableReassign && reassignOptions.length > 0;
-    if (composerHasAssigneePicker && isUnassignedReassignValue(reassignTarget)) {
-+++ joe:
-    const composerHasAssigneePicker = !masterIntake && enableReassign && reassignOptions.length > 0;
->>>>>>> joe
       setNoAssigneeDialogOpen(true);
       return;
     }
@@ -5162,24 +5114,14 @@ const IssueChatComposer = forwardRef<
     )
       return;
 
-<<<<<<< upstream+partial-joe
     const hasReassignment =
       enableReassign && reassignTarget !== currentAssigneeValue;
     const reassignment = hasReassignment
       ? (parseReassignment(reassignTarget) ?? undefined)
       : undefined;
-    const reopen = !masterIntake && shouldImplicitlyReopenComment(
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    const hasReassignment = enableReassign && reassignTarget !== currentAssigneeValue;
-    const reassignment = hasReassignment ? parseReassignment(reassignTarget) : undefined;
     const reopen = shouldImplicitlyReopenComment(
-+++ joe:
-    const hasReassignment = !masterIntake && enableReassign && reassignTarget !== currentAssigneeValue;
->>>>>>> joe
       issueStatus,
       hasReassignment ? reassignTarget : currentAssigneeValue,
-<<<<<<< upstream+partial-joe
     )
       ? true
       : undefined;
@@ -5211,26 +5153,17 @@ const IssueChatComposer = forwardRef<
     const viewportSnapshot = captureComposerViewportSnapshot(
       composerContainerRef.current,
     );
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    ) ? true : undefined;
-    const submittedBody = trimmed;
-    const viewportSnapshot = captureComposerViewportSnapshot(composerContainerRef.current);
-+++ joe:
-    const submittedAttachments = composerAttachments;
->>>>>>> joe
 
     const workModeChanged = pendingWorkMode !== resolvedIssueWorkMode;
     if (draftKey) saveDraft(draftKey, trimmed);
     setSubmitting(true);
     bodyRef.current = "";
-    if (masterIntake) bodyRef.current = "";
     setBody("");
     let attemptId: string | null = null;
     let request: ComposerSendRequest | null = null;
     const requestOwner = draftOwner;
     try {
-      if (!masterIntake && workModeChanged && onWorkModeChange) {
+      if (workModeChanged && onWorkModeChange) {
         await onWorkModeChange(pendingWorkMode);
       }
       const retained = draftKey ? loadDraftSubmission(draftKey) : null;
@@ -5264,7 +5197,6 @@ const IssueChatComposer = forwardRef<
         : onSend(submittedBody, reopen, reassignment,
             attachmentIds.length ? attachmentIds : undefined, attemptId);
       queueViewportRestore(viewportSnapshot);
-<<<<<<< upstream+partial-joe
       await sendPromise;
       // Settle the captured task even if the user navigated away. The exact
       // attempt guard preserves any newer submission in this or another tab.
@@ -5273,34 +5205,6 @@ const IssueChatComposer = forwardRef<
       if (mountedTaskKey.current !== draftKey) return;
       setComposerAttachments((current) =>
         current.filter((item) => !submittedAttachmentKeys.has(item.id)),
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      if (draftKey) clearDraft(draftKey);
-      setComposerAttachments([]);
-      setReassignTarget(effectiveSuggestedAssigneeValue);
-    } catch {
-      setBody((current) =>
-        restoreSubmittedCommentDraft({
-          currentBody: current,
-+++ joe:
-    } catch (error) {
-      if (masterIntake && error instanceof PendingIntakeError) {
-        setComposerAttachments(current => current === submittedAttachments ? [] : current);
-        if (draftKey) saveDraft(draftKey, bodyRef.current);
-        return;
-      }
---- base ctx:
-      await appendPromise;
-      if (draftKey) clearDraft(draftKey);
-      setComposerAttachments([]);
-      setReassignTarget(effectiveSuggestedAssigneeValue);
-    } catch {
-+++ joe:
-      if (draftKey) {
-        if (masterIntake) saveDraft(draftKey, bodyRef.current);
-        else clearDraft(draftKey);
-      }
->>>>>>> joe
       );
       manualAssigneeRef.current = false;
       setReassignTarget(effectiveSuggestedAssigneeValue);
@@ -5812,7 +5716,6 @@ const IssueChatComposer = forwardRef<
             testId="issue-chat-composer-work-mode-chip" />
         </div>
 
-<<<<<<< upstream+partial-joe
         {enableReassign && reassignOptions.length > 0 && companyId && agentMap ? (
           <ComposerRunSettingsPicker
             companyId={companyId}
@@ -5831,12 +5734,6 @@ const IssueChatComposer = forwardRef<
             }}
           />
         ) : enableReassign && reassignOptions.length > 0 ? (
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        {enableReassign && reassignOptions.length > 0 ? (
-+++ joe:
-        {!masterIntake && enableReassign && reassignOptions.length > 0 ? (
->>>>>>> joe
           <InlineEntitySelector
             ref={reassignTriggerRef}
             value={reassignTarget}
@@ -6013,7 +5910,6 @@ export function IssueChatThread({
   imageUploadHandler,
   onAttachImage,
   draftKey,
-  masterIntake = false,
   enableReassign = false,
   reassignOptions = [],
   currentAssigneeValue = "",
@@ -6992,7 +6888,6 @@ export function IssueChatThread({
             </div>
           ) : null}
 
-<<<<<<< upstream+partial-joe
           {showComposer ? (
             <div
               ref={composerViewportAnchorRef}
@@ -7033,27 +6928,6 @@ export function IssueChatThread({
             </div>
           ) : null}
         </div>
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-              composerHint={composerHint}
-              issueStatus={issueStatus}
-              issueWorkMode={issueWorkMode}
-              onWorkModeChange={onWorkModeChange}
-            />
-          </div>
-        ) : null}
-+++ joe:
-              onWorkModeChange={masterIntake ? undefined : onWorkModeChange}
---- base ctx:
-              onImageUpload={imageUploadHandler}
-              onAttachImage={onAttachImage}
-              draftKey={draftKey}
-              enableReassign={enableReassign}
-              reassignOptions={reassignOptions}
-              currentAssigneeValue={currentAssigneeValue}
-+++ joe:
-              masterIntake={masterIntake}
->>>>>>> joe
       </IssueChatCtx.Provider>
     </AssistantRuntimeProvider>
   );

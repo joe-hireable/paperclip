@@ -1,7 +1,6 @@
 import { useCurrentAccountGuard } from "@/hooks/useAccountBoundMutation";
 import { ComposerFileDropTarget } from "./ComposerFileDropTarget";
 import { AgentAvatar } from "../AgentAvatar";
-import { PendingIntakeError } from "../../lib/use-master-intake";
 import {
   useEffect,
   useId,
@@ -107,14 +106,7 @@ export interface TaskChatComposerTakeover {
 }
 
 interface TaskChatComposerProps {
-<<<<<<< upstream+partial-joe
   onAdd?: (
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  onAdd: (
-+++ joe:
-  masterIntake?: boolean;
->>>>>>> joe
     body: string,
     reopen?: boolean,
     reassignment?: CommentReassignment,
@@ -402,7 +394,6 @@ export function TaskChatComposer({
   onStop,
   confirmedStoppedRunIds,
   stopPending = false,
-  masterIntake = false,
   workMode,
   onWorkModeChange,
   disabled = false,
@@ -671,7 +662,7 @@ export function TaskChatComposer({
     !uncertainSubmission &&
     Boolean(creation || onAttachImage || onImageUpload);
   const showAssignee = Boolean(
-    !masterIntake && enableReassign && reassignOptions && reassignOptions.length > 0,
+    enableReassign && reassignOptions && reassignOptions.length > 0,
   );
   const assigneeValue = creation || conversationMode ? currentAssigneeValue : pendingAssignee ?? suggestedAssigneeValue ?? currentAssigneeValue;
   const showConversationModel = coordinator && conversationMode && supportsComposerModel(modelAgents?.get(assigneeValue.slice(6)));
@@ -1017,7 +1008,7 @@ export function TaskChatComposer({
     const reassignment = hasReassignment
       ? parseAssigneeValue(assigneeValue)
       : undefined;
-    const reopen = !masterIntake && shouldImplicitlyReopenComment(issueStatus, assigneeValue)
+    const reopen = shouldImplicitlyReopenComment(issueStatus, assigneeValue)
       ? true
       : undefined;
 
@@ -1050,7 +1041,7 @@ export function TaskChatComposer({
         onCancelQueuedEdit?.();
         return;
       }
-      if (!masterIntake && pendingMode !== workMode && onWorkModeChange) {
+      if (pendingMode !== workMode && onWorkModeChange) {
         await onWorkModeChange(pendingMode);
       }
       const retainedAfterMode = draftKey ? loadDraftSubmission(draftKey) : null;
@@ -1109,7 +1100,6 @@ export function TaskChatComposer({
       if (pendingAssigneeRef.current === submittedAssignee) {
         updatePendingAssignee(null);
       }
-<<<<<<< upstream+partial-joe
       setRunSettings(null);
     } catch (error) {
       if (mountedTaskKey.current !== draftKey) return;
@@ -1129,16 +1119,6 @@ export function TaskChatComposer({
           saveDraftSubmission(draftKey, uncertain);
       } else if (draftKey && attemptId)
         clearDraftSubmission(draftKey, attemptId);
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    } catch {
-+++ joe:
-    } catch (error) {
-      if (masterIntake && error instanceof PendingIntakeError) {
-        if (attachmentsRef.current === submittedAttachments) setAttachments([]);
-        return;
-      }
->>>>>>> joe
       // Restore the failed message for retry without discarding a next draft
       // that was entered while the request was pending.
       const restoredBody = nextDraft
@@ -1554,21 +1534,8 @@ export function TaskChatComposer({
                   : "Editing queued message"}
               </span>
             ) : (
-<<<<<<< upstream+partial-joe
               <ComposerModeChip mode={pendingMode} onRemove={onWorkModeChange ? () => changeMode("standard") : undefined}
                 disabled={disabled || !!uncertainSubmission} testId="task-chat-composer-mode" mobile={mobile} />
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    disabled={disabled || !onWorkModeChange}
-                    aria-keyshortcuts="Meta+Period Control+Period Shift+Tab"
-                    className={cn(
-                      "flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium disabled:opacity-50",
-+++ joe:
-                    disabled={disabled || masterIntake || !onWorkModeChange}
->>>>>>> joe
             )}
             </div>
 

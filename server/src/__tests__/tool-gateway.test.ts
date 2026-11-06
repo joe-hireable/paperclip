@@ -964,7 +964,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         const token = await gateway.createNamedGatewayToken({
           companyId: company.id,
           gatewayId: created.id,
-          body: { name, allowedActions: ["tools/call"] },
+          body: { name, clientLabel: name, ownerNote: "", allowedActions: ["tools/call"] },
         });
         clients.push({ gatewayId: created.id, endpointPath: created.endpointPath, token: token.token });
       }
@@ -1041,7 +1041,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         companyId: company.id, body: { name: "Error fixture", profileId: profile!.id },
       });
       const token = await gateway.createNamedGatewayToken({
-        companyId: company.id, gatewayId: named.id, body: { name: "Error fixture", allowedActions: ["tools/call"] },
+        companyId: company.id, gatewayId: named.id, body: { name: "Error fixture", clientLabel: "Error fixture", ownerNote: "", allowedActions: ["tools/call"] },
       });
       const app = createGatewayRouteApp(db, gateway, {
         type: "board", userId: "instance-admin", source: "session", companyIds: [company.id],
@@ -1181,7 +1181,7 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         const token = await gateway.createNamedGatewayToken({
           companyId: owner.id,
           gatewayId: created.id,
-          body: { name: "Audit fixture", allowedActions: ["tools/list", "tools/call"] },
+          body: { name: "Audit fixture", clientLabel: "Audit fixture", ownerNote: "", allowedActions: ["tools/list", "tools/call"] },
         });
         const response = await request(app)
           .post("/api/tool-gateway/tools/call")

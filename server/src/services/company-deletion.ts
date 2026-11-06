@@ -14,6 +14,7 @@ import { notifyCompanyRetentionWork } from "./retention-work-notifications.js";
 import { notifyToolReviewChange } from "./tool-review-work-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { agentObservabilityService } from "./agent-observability.js";
+import { removeReleasedRunExecutionBindings } from "./execution-bindings.js";
 import { withAccountHomeSecretMutationLock } from "@paperclipai/adapter-codex-local/server";
 import type { Db } from "@paperclipai/db";
 import { eq, inArray } from "drizzle-orm";
@@ -37,6 +38,7 @@ import {
   goals,
   heartbeatRuns,
   runIdentityContexts,
+  executionBindings,
   heartbeatRunEvents,
   costEvents,
   decisionInvocations,
@@ -101,7 +103,11 @@ export async function deleteCompany(db: Db, id: string) {
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })
           .from(heartbeatRuns)
-          .where(eq(heartbeatRuns.companyId, id));
+          .where(eq(heartbeatRuns.companyId, id))
+          .for("update");
+
+        await removeReleasedRunExecutionBindings(tx as unknown as Db, id, companyRunIds.map((run) => run.id));
+        await tx.delete(executionBindings).where(eq(executionBindings.companyId, id));
 
         await tx.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.companyId, id));
         if (companyRunIds.length > 0) {

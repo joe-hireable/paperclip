@@ -881,19 +881,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     run: { id: runId, source: "on_demand" },
     context,
   };
-<<<<<<< upstream+partial-joe
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    ? ""
-    : renderTemplate(promptTemplate, templateData);
-  const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
-  const prompt = joinPromptSections([
-    renderedBootstrapPrompt,
-    wakePrompt,
-    sessionHandoffNote,
-+++ joe:
-  const prompt = coordinator ? asString(context.coordinatorPrompt, "") : joinPromptSections([
->>>>>>> joe
   const passesConfiguredModel = Boolean(
     model && (!isBedrockAuth(modelEnv) || isBedrockModelId(model)),
   );

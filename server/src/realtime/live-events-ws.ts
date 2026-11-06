@@ -230,10 +230,6 @@ async function authorizeUpgrade(
     return null;
   }
 
-  if (key.scopeConfig?.kind === "approval_reader") {
-    return null;
-  }
-
   await db
     .update(agentApiKeys)
     .set({ lastUsedAt: new Date() })

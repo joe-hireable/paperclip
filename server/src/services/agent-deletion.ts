@@ -13,6 +13,7 @@ import { agents, agentApiKeys, agentRuntimeState, agentTaskSessions, agentWakeup
   budgetReservations, costEvents, financeEvents, heartbeatRunEvents, heartbeatRuns, issueExecutionDecisions, issues, issueComments,
   caseHandoffs, principalPermissionGrants, type Db } from "@paperclipai/db";
 import { conflict } from "../errors.js";
+import { removeReleasedRunExecutionBindings } from "./execution-bindings.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { deleteAgentAdmissionHistory } from "../modules/execution-admission/index.js";
 
@@ -60,6 +61,9 @@ export async function deleteAgentDependencies(tx: Db, companyId: string, id: str
   await notifyAttentionRetentionWork(tx, { companyId });
   await notifyExternalConversationSettlement(tx, { companyId });
   await issueThreadInteractionService(tx).cancelPendingForDeletedAddressee(companyId, id);
+  const agentRunRows = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+    .where(eq(heartbeatRuns.agentId, id)).for("update");
+  await removeReleasedRunExecutionBindings(tx, companyId, agentRunRows.map((run) => run.id));
   await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
   await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
   await notifyStatusCardIssueChange(tx, companyId);

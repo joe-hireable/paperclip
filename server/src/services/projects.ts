@@ -668,19 +668,13 @@ async function ensureSinglePrimaryWorkspace(
     );
 }
 
-<<<<<<< upstream+partial-joe
-export function projectService(db: Db, options: { captureWorkspaceUpdates?: boolean } = {}) {
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-export function projectService(db: Db) {
-+++ joe:
 function rejectCoordinationPolicyMutation(data: object) {
   if ("coordinationPolicy" in data || "coordinationPolicyRevision" in data) {
     throw unprocessable("Use the dedicated project coordination policy endpoint");
   }
 }
 
->>>>>>> joe
+export function projectService(db: Db, options: { captureWorkspaceUpdates?: boolean } = {}) {
   const createProject = async (
     companyId: string,
     data: Omit<typeof projects.$inferInsert, "companyId"> & { goalIds?: string[] },
@@ -1002,15 +996,9 @@ function rejectCoordinationPolicyMutation(data: object) {
     update: async (
       id: string,
       data: Partial<typeof projects.$inferInsert> & { goalIds?: string[] },
-<<<<<<< upstream+partial-joe
     ): Promise<ProjectWithGoals | null> => db.transaction(async tx => {
       const db = tx as unknown as Db;
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    ): Promise<ProjectWithGoals | null> => {
-+++ joe:
       rejectCoordinationPolicyMutation(data);
->>>>>>> joe
       const { goalIds: inputGoalIds, ...projectData } = data;
       const ids = resolveGoalIds({ goalIds: inputGoalIds, goalId: projectData.goalId });
       const existingProject = await db
@@ -1060,14 +1048,18 @@ function rejectCoordinationPolicyMutation(data: object) {
         updates.goalId = ids.length > 0 ? ids[0] : null;
       }
 
-<<<<<<< upstream+partial-joe
       const row = await db.transaction(async (tx) => {
         if (updates.visibility !== undefined) {
           await notifyStatusCardIssueChange(tx, existingProject.companyId);
           await notifyChatInboundWakeNotices(tx, { companyId: existingProject.companyId });
           await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existingProject.companyId}`}, 0))`);
         }
-        const [updated] = await tx.update(projects).set(updates).where(eq(projects.id, id)).returning();
+        const [updated] = await tx.update(projects).set(updates).where(and(
+          eq(projects.id, id),
+          // Atomic with policy CAS: once board-owned, generic calls cannot change its role/scope.
+          ...(projectData.leadAgentId !== undefined || projectData.companyId !== undefined || projectData.id !== undefined
+            ? [eq(projects.coordinationPolicyRevision, 0)] : []),
+        )).returning();
         if (updated?.visibility === "private" && updates.visibility === "private") {
           const protectedRows = await tx.execute(sql`with recursive protected_tasks as (
             select i.id from issues i where i.project_id = ${id} and i.company_id = ${updated.companyId}
@@ -1088,23 +1080,6 @@ function rejectCoordinationPolicyMutation(data: object) {
         return updated ?? null;
       });
       if (!row) throw conflict("Use the dedicated policy endpoint to change a coordinated project's lead or scope");
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      const row = await db
-        .update(projects)
-        .set(updates)
-        .where(eq(projects.id, id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-      if (!row) return null;
-+++ joe:
-        .where(and(
-          eq(projects.id, id),
-          // Atomic with policy CAS: once board-owned, generic calls cannot change its role/scope.
-          ...(projectData.leadAgentId !== undefined || projectData.companyId !== undefined || projectData.id !== undefined
-            ? [eq(projects.coordinationPolicyRevision, 0)] : []),
-        ))
->>>>>>> joe
 
       if (ids !== undefined) {
         await syncGoalLinks(db, id, row.companyId, ids);

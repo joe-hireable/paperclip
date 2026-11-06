@@ -1075,6 +1075,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     expect(await db.select().from(toolInvocations)).toHaveLength(1);
   });
 
+  it.each([
     ["derived", "named-to-named"],
     ["derived", "named-to-null"],
     ["derived", "null-to-named"],
@@ -1082,6 +1083,7 @@ describeEmbeddedPostgres("tool access policy service", () => {
     ["explicit", "named-to-null"],
     ["explicit", "null-to-named"],
   ] as const)("scopes side-effecting invocation replay for %s keys across %s", async (keyKind, boundary) => {
+    const company = await createCompany(db);
     const { connection, catalogEntry } = await createTool(db, company.id);
     const [profile] = await db.insert(toolProfiles).values({
       companyId: company.id,
@@ -1123,7 +1125,10 @@ describeEmbeddedPostgres("tool access policy service", () => {
         ...(keyKind === "explicit" ? { idempotencyKey: "shared-send-1" } : {}),
       },
     };
+    const svc = toolAccessPolicyService(db);
+    const decision = await svc.decide(input);
     expect(decision.allowed).toBe(true);
+    const first = await svc.recordInvocation(input, decision);
     const replay = await svc.recordInvocation(input, decision);
     expect(first.replayed).toBe(false);
     expect(first.invocation.gatewayId).toBe(ownerGatewayId);

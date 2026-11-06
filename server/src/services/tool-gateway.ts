@@ -468,7 +468,6 @@ type HeaderPolicySummary = {
 
 type RemoteHttpExecutionResult = {
   result: unknown;
-  isError: boolean;
   headerSummary?: HeaderPolicySummary;
   execution?: RemoteHttpExecutionAudit;
 };
@@ -816,23 +815,6 @@ function summarizeResult(result: unknown): Record<string, unknown> {
     hasData: record.data !== undefined,
     hasError: Boolean(record.error),
   };
-}
-
-function mcpToolFailure(execution: RemoteHttpExecutionResult | null, summary: ReturnType<typeof summarizeToolValue>) {
-  if (!execution?.isError) return null;
-  // Use the existing bounded, redacted summary rather than the raw provider text.
-  let message = summary.summary;
-  try {
-    const result = asRecord(JSON.parse(message));
-    if (typeof result?.content === "string") message = result.content;
-  } catch {
-    // A truncated summary still contains a safe diagnostic.
-  }
-  return { errorCode: "mcp_tool_error", errorMessage: message || "MCP tool returned an error result" };
-}
-
-function isStoredMcpToolFailure(invocation: typeof toolInvocations.$inferSelect) {
-  return invocation.status === "failed" && invocation.errorCode === "mcp_tool_error";
 }
 
 function inferToolRisk(toolName: string): ToolGatewayDescriptor["risk"] {
@@ -2315,7 +2297,6 @@ export function createToolGatewayService(
     const metadata = input.tool ? toolAuditMetadata(input.tool) : {};
     await db.insert(toolCallEvents).values({
       companyId: input.session.companyId,
-      gatewayId: input.session.gatewayId ?? null,
       invocationId: input.invocationId ?? null,
       actionRequestId: input.actionRequestId ?? null,
       eventType: input.eventType,
@@ -6627,7 +6608,7 @@ export function createToolGatewayService(
         "ok",
         "Remote MCP server responded to tools/call.",
       );
-      return { result, isError: result.data.isError, headerSummary, execution };
+      return { result, headerSummary, execution };
     } catch (error) {
       if (error instanceof McpHttpResponseError) {
         const failure = error.reason === "too_large" ? responseTooLargeError()
@@ -6736,19 +6717,9 @@ export function createToolGatewayService(
         return invoke();
       },
     );
-<<<<<<< upstream+partial-joe
     return {
       result: normalizeMcpToolResult(result, template.templateId === "paperclip.cognee-cloud" ? "cognee_cloud" : "local_stdio", template.templateId !== "paperclip.cognee-cloud"),
     };
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    return {
-      result: normalizeMcpToolResult(result, "local_stdio", true),
-    };
-+++ joe:
-    const normalized = normalizeMcpToolResult(result, "local_stdio", true);
-    return { result: normalized, isError: normalized.data.isError };
->>>>>>> joe
   }
 
   async function runWithTimeout<T>(
@@ -7690,91 +7661,14 @@ export function createToolGatewayService(
         value: result,
         direction: "result",
         sensitiveMode: "redact",
-<<<<<<< upstream+partial-joe
         promptInjectionMode: "block", classifier: resultClassifier(args.session, args.tool, args.invocationId, { signal: args.signal, approvedAction: Boolean(args.session.approvedInvocationId) }),
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-          source: "test",
-          invocationId: args.invocationId,
-          decision: "allow",
-          reasonCode: "tool_completed",
-          tool: args.tool.name,
-          ...toolAuditMetadata(args.tool),
-          durationMs: Date.now() - startedAt,
-+++ joe:
-          reasonCode: toolError?.errorCode ?? "tool_completed",
---- base ctx:
-        issueId: null,
-        actorType: "user",
-        actorId: args.userId,
-        action: "tool_gateway.call_completed",
-        details: {
-          source: "test",
-          invocationId: args.invocationId,
-+++ joe:
-        action: toolError ? "tool_gateway.call_failed" : "tool_gateway.call_completed",
---- base ctx:
-        outcome: "success",
-        toolName: args.tool.name,
-        policyDecision: "allow",
-        reasonCode: "tool_completed",
-        argumentsSummary: args.argumentsSummary,
-        resultSummary: resultValidation.summary,
-        metadata: {
-+++ joe:
-        reasonCode: toolError?.errorCode ?? "tool_completed",
---- base ctx:
-      await writeToolCallEvent({
-        invocationId: args.invocationId,
-        session: args.session,
-        eventType: "call_completed",
-        outcome: "success",
-        toolName: args.tool.name,
-        policyDecision: "allow",
-        reasonCode: "tool_completed",
-+++ joe:
-        eventType: toolError ? "call_failed" : "call_completed",
-        outcome: toolError ? "failure" : "success",
---- base ctx:
-      await db
-        .update(toolInvocations)
-        .set({
-          status: "succeeded",
-          resultHash: resultValidation.summary.sha256 ?? null,
-          resultSummary: resultValidation.summary,
-          resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
-+++ joe:
-          status: toolError ? "failed" : "succeeded",
-          ...toolError,
---- base ctx:
-        promptInjectionMode: "block",
       });
-      await db
-        .update(toolInvocations)
-        .set({
-+++ joe:
-      const toolError = mcpToolFailure(connectedMcpExecution, resultValidation.summary);
->>>>>>> joe
-      });
-<<<<<<< upstream+partial-joe
       const providerResult = asRecord(resultValidation.value);
       if (providerResult?.error) {
         throw new ToolGatewayHttpError(providerResult.errorCode === "github_access_denied" ? 403 : 502,
           String(providerResult.content || providerResult.error),
           providerResult.errorCode === "github_access_denied" ? "github_access_denied" : "tool_error", { execution: connectedMcpExecution.execution });
       }
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      return {
-        decision: "allowed" as const,
-        invocationId: args.invocationId,
-+++ joe:
-      if (toolError) return {
-        decision: "allowed" as const,
-        invocationId: args.invocationId,
-        error: { message: toolError.errorMessage, reasonCode: toolError.errorCode },
-      };
->>>>>>> joe
     } catch (err) {
       const status = err instanceof ToolGatewayHttpError ? err.status : 502;
       const reasonCode =
@@ -7978,7 +7872,6 @@ export function createToolGatewayService(
           } };
         },
       );
-<<<<<<< upstream+partial-joe
       if (!access.allowed && access.decision !== "require_approval") {
         throw new ToolGatewayHttpError(403, access.explanation, access.reasonCode);
       }
@@ -7987,36 +7880,6 @@ export function createToolGatewayService(
       execution = { session, managementContext, tool, parameters: signedPayload.arguments, invocationId: invocation.id,
         companyId: invocation.companyId, agentId, userId, argumentsSummary, reasonCode: "approval_granted",
         approvedClaim: claim, matchedPolicyIds: invocation.matchedPolicyIds ?? [] };
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        reasonCode: "approval_granted",
-        matchedPolicyIds: invocation.matchedPolicyIds ?? [],
-      });
-      await reflectToolActionInteractionLifecycle({ actionRequestId, status: "executed" });
-+++ joe:
-      const error = "error" in execution ? execution.error : null;
-      if (error) {
-        const now = new Date();
-        await db.update(toolActionRequests).set({ status: "failed", resolvedAt: now, updatedAt: now })
-          .where(and(eq(toolActionRequests.id, actionRequestId), eq(toolActionRequests.status, "approved")));
-      }
-      await reflectToolActionInteractionLifecycle({
-        actionRequestId,
-        status: error ? "failed" : "executed",
-        errorCode: error?.reasonCode,
-        errorMessage: error?.message,
-      });
---- base ctx:
-      promptInjectionMode: "ignore",
-    }).summary;
-    try {
-      await runTestToolInvocation({
-        session,
-        tool,
-        parameters,
-+++ joe:
-      const execution = await runTestToolInvocation({
->>>>>>> joe
     } catch (err) {
       if (!isApprovalPreparationRejection(err)) {
         // Preparation has not entered runTestToolInvocation. Preserve approval
@@ -8368,8 +8231,8 @@ export function createToolGatewayService(
         .from(toolInvocations)
         .where(eq(toolInvocations.id, invocation.id))
         .limit(1);
-      if (settledInvocation && (settled?.status === "executed" || (settled?.status === "failed" && isStoredMcpToolFailure(settledInvocation)))) {
-        return { result: storedInvocationResult(settledInvocation), isError: isStoredMcpToolFailure(settledInvocation) };
+      if (settled?.status === "executed" && settledInvocation) {
+        return storedInvocationResult(settledInvocation);
       }
       if (settled?.status === "failed") {
         throw new ToolGatewayHttpError(
@@ -8576,7 +8439,6 @@ export function createToolGatewayService(
     try {
       await assertCurrentGatewayIssuer(session, tool, parameters, invocation.id, true);
       const executionTimeoutMs = timeoutMs(APPROVED_EXECUTION_TIMEOUT_MS);
-<<<<<<< upstream+partial-joe
       const result =
         (tool.providerType === "mcp_remote_http" || tool.providerType === "provider_rest")
           ? (
@@ -8617,40 +8479,12 @@ export function createToolGatewayService(
           resultRecord.errorCode === "github_access_denied" ? "github_access_denied" : "tool_execution_failed",
         );
       const resultValidation = await validateToolContent({
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      const result = tool.providerType === "mcp_remote_http"
-        ? (await executeRemoteHttpTool(session, tool, parameters, executionTimeoutMs, invocation.id)).result
-        : tool.providerType === "mcp_local_stdio"
-          ? (await executeLocalStdioTool(session, tool, parameters, executionTimeoutMs)).result
-          : tool.providerType !== "paperclip_plugin"
-            ? await runWithTimeout(executeBuiltinTool(session, tool, parameters), executionTimeoutMs)
-            : (() => { throw new ToolGatewayHttpError(409, "Plugin actions cannot execute outside their originating run", "approved_execution_unsupported"); })();
-      const resultValidation = validateToolContent({
-+++ joe:
-          ? await executeLocalStdioTool(session, tool, parameters, executionTimeoutMs)
-          : null;
-      const result = connectedMcpExecution
-        ? connectedMcpExecution.result
-        : tool.providerType !== "paperclip_plugin"
---- base ctx:
-      const result = tool.providerType === "mcp_remote_http"
-        ? (await executeRemoteHttpTool(session, tool, parameters, executionTimeoutMs, invocation.id)).result
-        : tool.providerType === "mcp_local_stdio"
-          ? (await executeLocalStdioTool(session, tool, parameters, executionTimeoutMs)).result
-          : tool.providerType !== "paperclip_plugin"
-+++ joe:
-      const connectedMcpExecution = tool.providerType === "mcp_remote_http"
-        ? await executeRemoteHttpTool(session, tool, parameters, executionTimeoutMs, invocation.id)
->>>>>>> joe
         value: result,
         direction: "result",
         sensitiveMode: "redact",
         promptInjectionMode: "block", classifier: resultClassifier(session, tool, invocation.id, { approvedAction: true }),
       });
-      const toolError = mcpToolFailure(connectedMcpExecution, resultValidation.summary);
       const now = new Date();
-<<<<<<< upstream+partial-joe
       await db
         .update(toolInvocations)
         .set({
@@ -8667,40 +8501,20 @@ export function createToolGatewayService(
         .update(toolActionRequests)
         .set({ status: "executed", resolvedAt: now, updatedAt: now })
         .where(eq(toolActionRequests.id, claimed.id)));
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        completedAt: now,
-        updatedAt: now,
-      }).where(eq(toolInvocations.id, invocation.id));
-      await db.update(toolActionRequests).set({ status: "executed", resolvedAt: now, updatedAt: now }).where(eq(toolActionRequests.id, claimed.id));
-+++ joe:
-      await db.update(toolActionRequests).set({ status: toolError ? "failed" : "executed", resolvedAt: now, updatedAt: now }).where(eq(toolActionRequests.id, claimed.id));
---- base ctx:
-      await db.update(toolInvocations).set({
-        status: "succeeded",
-        resultHash: resultValidation.summary.sha256 ?? null,
-        resultSummary: resultValidation.summary,
-        resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
-+++ joe:
-        status: toolError ? "failed" : "succeeded",
-        ...toolError,
->>>>>>> joe
       await reflectToolActionInteractionLifecycle({
         actionRequestId: claimed.id,
-        status: toolError ? "failed" : "executed",
-        errorCode: toolError?.errorCode,
-        errorMessage: toolError?.errorMessage,
+        status: "executed",
         resultSummary: resultValidation.summary.summary,
       });
       await writeToolCallEvent({
         invocationId: invocation.id,
         actionRequestId: claimed.id,
         session,
-        eventType: toolError ? "call_failed" : "call_completed",
-        outcome: toolError ? "failure" : "success",
+        eventType: "call_completed",
+        outcome: "success",
         toolName: tool.name,
         policyDecision: "allow",
-        reasonCode: toolError?.errorCode ?? "approved_action_executed",
+        reasonCode: "approved_action_executed",
         argumentsSummary,
         resultSummary: resultValidation.summary,
         detectorMetadata: resultValidation.detectorMetadata,
@@ -8710,7 +8524,7 @@ export function createToolGatewayService(
         },
         tool,
       });
-      return { result: resultValidation.value, isError: Boolean(toolError) };
+      return resultValidation.value;
     } catch (error) {
       const { reasonCode } = await markApprovedActionFailed({
         actionRequestId: claimed.id,
@@ -8749,7 +8563,6 @@ export function createToolGatewayService(
         invocation: toolInvocations,
       })
       .from(toolActionRequests)
-<<<<<<< upstream+partial-joe
       .innerJoin(
         toolInvocations,
         eq(toolInvocations.id, toolActionRequests.invocationId),
@@ -8775,29 +8588,6 @@ export function createToolGatewayService(
         desc(sql`${toolActionRequests.canonicalArgumentsHash} = ${input.argumentsHash}`),
         desc(toolActionRequests.createdAt),
       )
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        eq(toolActionRequests.canonicalArgumentsHash, input.argumentsHash),
-        eq(toolInvocations.agentId, input.session.agentId),
-        eq(toolInvocations.toolName, input.toolName),
-        inArray(toolActionRequests.status, ["pending", "approved", "executing", "rejected", "executed"]),
-      ))
-      .orderBy(desc(toolActionRequests.createdAt))
-+++ joe:
-        or(
-          inArray(toolActionRequests.status, ["pending", "approved", "executing", "rejected", "executed"]),
-          and(eq(toolActionRequests.status, "failed"), eq(toolInvocations.status, "failed"), eq(toolInvocations.errorCode, "mcp_tool_error")),
-        ),
---- base ctx:
-        eq(toolActionRequests.issueId, input.session.issueId),
-        eq(toolActionRequests.canonicalArgumentsHash, input.argumentsHash),
-        eq(toolInvocations.agentId, input.session.agentId),
-        eq(toolInvocations.toolName, input.toolName),
-        inArray(toolActionRequests.status, ["pending", "approved", "executing", "rejected", "executed"]),
-      ))
-+++ joe:
-        input.session.gatewayId ? eq(toolInvocations.gatewayId, input.session.gatewayId) : isNull(toolInvocations.gatewayId),
->>>>>>> joe
       .limit(1);
     if (!match) return null;
     if (match.actionRequest.signedArguments) {
@@ -8933,25 +8723,15 @@ export function createToolGatewayService(
         },
       );
     }
-<<<<<<< upstream+partial-joe
     if (actionRequest.status === "executed") {
       return {
         matched: true as const,
         result: storedInvocationResult(invocation),
         invocationId: invocation.id,
       };
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    if (actionRequest.status === "executed") {
-      return { matched: true as const, result: storedInvocationResult(invocation), invocationId: invocation.id };
-+++ joe:
-    if (actionRequest.status === "executed" || (actionRequest.status === "failed" && isStoredMcpToolFailure(invocation))) {
-      return { matched: true as const, result: storedInvocationResult(invocation), invocationId: invocation.id, isError: isStoredMcpToolFailure(invocation) };
->>>>>>> joe
     }
     if (actionRequest.status === "executing") {
       const settled = await waitForActionRequestExecution(actionRequest.id);
-<<<<<<< upstream+partial-joe
       const [settledInvocation] = await db
         .select()
         .from(toolInvocations)
@@ -8963,15 +8743,6 @@ export function createToolGatewayService(
           result: storedInvocationResult(settledInvocation),
           invocationId: invocation.id,
         };
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      const [settledInvocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, invocation.id)).limit(1);
-      if (settled?.status === "executed" && settledInvocation) {
-        return { matched: true as const, result: storedInvocationResult(settledInvocation), invocationId: invocation.id };
-+++ joe:
-      if (settledInvocation && (settled?.status === "executed" || (settled?.status === "failed" && isStoredMcpToolFailure(settledInvocation)))) {
-        return { matched: true as const, result: storedInvocationResult(settledInvocation), invocationId: invocation.id, isError: isStoredMcpToolFailure(settledInvocation) };
->>>>>>> joe
       }
       throw new ToolGatewayHttpError(
         502,
@@ -8980,20 +8751,11 @@ export function createToolGatewayService(
       );
     }
     if (actionRequest.status === "approved" && actionRequest.decidedAt) {
-<<<<<<< upstream+partial-joe
       const result = await executeApprovedAgentInvocation({
         actionRequest,
         invocation,
       });
       return { matched: true as const, result, invocationId: invocation.id };
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      const result = await executeApprovedAgentInvocation({ actionRequest, invocation });
-      return { matched: true as const, result, invocationId: invocation.id };
-+++ joe:
-      const execution = await executeApprovedAgentInvocation({ actionRequest, invocation });
-      return { matched: true as const, ...execution, invocationId: invocation.id };
->>>>>>> joe
     }
     return null;
   }
@@ -9021,17 +8783,10 @@ export function createToolGatewayService(
       phase = "cancelled";
     } else if (actionRequest.status === "expired") {
       phase = "expired";
-<<<<<<< upstream+partial-joe
     } else if (
       actionRequest.status === "approved" ||
       actionRequest.status === "executed" || actionRequest.status === "failed"
     ) {
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    } else if (actionRequest.status === "approved" || actionRequest.status === "executed") {
-+++ joe:
-    } else if (actionRequest.status === "approved" || actionRequest.status === "executed" || actionRequest.status === "failed") {
->>>>>>> joe
       phase = invocationDone ? "done" : "running";
     } else {
       phase = "waiting";
@@ -10678,7 +10433,6 @@ export function createToolGatewayService(
           }
           throw error;
         });
-<<<<<<< upstream+partial-joe
         const [invocation] = await db
           .insert(toolInvocations)
           .values({
@@ -10712,16 +10466,6 @@ export function createToolGatewayService(
           .returning();
         if (resultValidation.detectorMetadata?.invocationId) await injectionPrevention.linkToolInvocation(
           session.companyId, resultValidation.detectorMetadata.invocationId, invocation.id);
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        const [invocation] = await db.insert(toolInvocations).values({
-          companyId: session.companyId,
-          actorType: session.actorType ?? (session.agentId ? "agent" : "system"),
-          actorId: session.actorId ?? session.agentId ?? session.gatewayTokenId ?? session.companyId,
-          agentId: session.agentId,
-+++ joe:
-          gatewayId: session.gatewayId ?? null,
->>>>>>> joe
         await writeToolCallEvent({
           invocationId: invocation.id,
           session,
@@ -10860,7 +10604,6 @@ export function createToolGatewayService(
           return {
             invocationId: replay.invocationId,
             status: "replayed" as const,
-            ...(replay.isError ? { isError: true } : {}),
             tool: virtualToolName ?? tool.name,
             targetTool: virtualToolName ? tool.name : undefined,
             result: replayResult,
@@ -10898,21 +10641,11 @@ export function createToolGatewayService(
         }
         const requestingActor = policyInputForTool({ session, tool }).actor;
         if (
-<<<<<<< upstream+partial-joe
           actionRequest.issueId !== session.issueId ||
           storedInvocation.issueId !== session.issueId ||
           storedInvocation.agentId !== session.agentId ||
           storedInvocation.runId !== session.runId ||
           actionRequest.requestedByAgentId !== (requestingActor.actorType === "agent" ? requestingActor.actorId : null)
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-          || storedInvocation.issueId !== session.issueId
-          || storedInvocation.agentId !== session.agentId
-          || storedInvocation.runId !== session.runId
-          || actionRequest.requestedByAgentId !== session.agentId
-+++ joe:
-          || storedInvocation.gatewayId !== (session.gatewayId ?? null)
->>>>>>> joe
         ) {
           throw new ToolGatewayHttpError(
             403,
@@ -11261,7 +10994,6 @@ export function createToolGatewayService(
         );
         await policyService.writeAudit(decisionInput, accessDecision);
         invocationId = recorded.invocation.id;
-<<<<<<< upstream+partial-joe
         const retryingSlackRateLimit = recorded.replayed && accessDecision.allowed && tool.providerType === "paperclip_slack_chat" && session.agentId && session.runId && session.issueId
           ? await claimSlackRateLimitRetry(db, { companyId: session.companyId, agentId: session.agentId, runId: session.runId, issueId: session.issueId, endpointId: String(asRecord(tool.providerMetadata)?.endpointId ?? ""), identityContextId: session.identityContextId }, invocationId)
           : false;
@@ -11306,23 +11038,17 @@ export function createToolGatewayService(
         if (recorded.replayed && !retryingSlackRateLimit && !retryingGitHubPublication) {
           if (gitHubPublicationReplay && !gitHubReplayPolicyAllowed)
             throw new ToolGatewayHttpError(policyErrorStatus(accessDecision), accessDecision.explanation, accessDecision.reasonCode);
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        if (recorded.replayed) {
-+++ joe:
-          const isError = isStoredMcpToolFailure(recorded.invocation);
->>>>>>> joe
           await writeAudit({
             session,
             companyId: session.companyId,
             agentId: session.agentId,
             runId: session.runId,
             issueId: session.issueId,
-            action: isError ? "tool_gateway.call_failed" : "tool_gateway.call_completed",
+            action: "tool_gateway.call_completed",
             details: {
               invocationId,
               decision: "allow",
-              reasonCode: isError ? "mcp_tool_error" : "idempotent_replay",
+              reasonCode: "idempotent_replay",
               tool: tool.name,
               ...toolAuditMetadata(tool),
               replayed: true,
@@ -11331,9 +11057,8 @@ export function createToolGatewayService(
           return {
             invocationId,
             status: "replayed" as const,
-            ...(isError ? { isError: true } : {}),
             tool: tool.name,
-            result: isError ? storedInvocationResult(recorded.invocation) : recorded.invocation.resultSummary ?? null,
+            result: recorded.invocation.resultSummary ?? null,
           };
         }
         if (accessDecision.decision === "require_approval") {
@@ -11476,7 +11201,6 @@ export function createToolGatewayService(
           sensitiveMode: "redact",
           promptInjectionMode: "block", classifier: resultClassifier(session, tool, invocationId, { approvedAction: Boolean(input.approvedActionRequestId), signal: input.signal }),
         });
-        const toolError = mcpToolFailure(connectedMcpExecution, resultValidation.summary);
         const completedAt = new Date();
         const validatedMcpResult = connectedMcpExecution
           ? asRecord(resultValidation.value)
@@ -11492,8 +11216,7 @@ export function createToolGatewayService(
         await db
           .update(toolInvocations)
           .set({
-            status: toolError ? "failed" : "succeeded",
-            ...toolError,
+            status: "succeeded",
             resultHash: resultValidation.summary.sha256 ?? null,
             resultSummary: resultValidation.summary,
             resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
@@ -11505,7 +11228,6 @@ export function createToolGatewayService(
           const actionRequestId = input.approvedActionRequestId;
           const [executedRequest] = await writeToolReviewChange(db, session.companyId, tx => tx
             .update(toolActionRequests)
-<<<<<<< upstream+partial-joe
             .set({
               status: "executed",
               resolvedAt: completedAt,
@@ -11518,21 +11240,10 @@ export function createToolGatewayService(
               ),
             )
             .returning({ id: toolActionRequests.id }));
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-            .set({ status: "executed", resolvedAt: completedAt, updatedAt: completedAt })
-            .where(and(
-              eq(toolActionRequests.id, input.approvedActionRequestId),
-              eq(toolActionRequests.status, "executing"),
-+++ joe:
-            .set({ status: toolError ? "failed" : "executed", resolvedAt: completedAt, updatedAt: completedAt })
->>>>>>> joe
           if (executedRequest) {
             await reflectToolActionInteractionLifecycle({
               actionRequestId: executedRequest.id,
-              status: toolError ? "failed" : "executed",
-              errorCode: toolError?.errorCode,
-              errorMessage: toolError?.errorMessage,
+              status: "executed",
             });
           }
         }
@@ -11540,11 +11251,11 @@ export function createToolGatewayService(
           invocationId,
           actionRequestId: input.approvedActionRequestId ?? null,
           session,
-          eventType: toolError ? "call_failed" : "call_completed",
-          outcome: toolError ? "failure" : "success",
+          eventType: "call_completed",
+          outcome: "success",
           toolName: tool.name,
           policyDecision: input.approvedActionRequestId ? "allow" : "allow",
-          reasonCode: toolError?.errorCode ?? "tool_completed",
+          reasonCode: "tool_completed",
           argumentsSummary: effectiveArgumentsSummary,
           resultSummary: resultValidation.summary,
           detectorMetadata: resultValidation.detectorMetadata,
@@ -11568,11 +11279,11 @@ export function createToolGatewayService(
           agentId: session.agentId,
           runId: session.runId,
           issueId: session.issueId,
-          action: toolError ? "tool_gateway.call_failed" : "tool_gateway.call_completed",
+          action: "tool_gateway.call_completed",
           details: {
             invocationId,
             decision: "allow",
-            reasonCode: toolError?.errorCode ?? "tool_completed",
+            reasonCode: "tool_completed",
             tool: tool.name,
             virtualToolName,
             targetToolName: virtualToolName ? tool.name : undefined,
@@ -11593,7 +11304,6 @@ export function createToolGatewayService(
         return {
           invocationId,
           status: "completed" as const,
-          ...(toolError ? { isError: true } : {}),
           tool: virtualToolName ?? tool.name,
           targetTool: virtualToolName ? tool.name : undefined,
           result: resultValidation.value,

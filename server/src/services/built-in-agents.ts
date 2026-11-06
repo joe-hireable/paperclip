@@ -760,17 +760,10 @@ async function assertKnownBuiltInAgentModel(
   const model = typeof adapterConfig.model === "string" ? adapterConfig.model.trim() : "";
   if (!model || !hasCompleteAdapterConfig(adapterType, adapterConfig)) return;
 
-<<<<<<< upstream+partial-joe
-  const models = await listAdapterModels(agentHarnessType(adapterType, adapterConfig));
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  const models = await listAdapterModels(adapterType);
-+++ joe:
   const bindings = executionBindingService(db);
   const models = await bindings.isRegisteredHarness(adapterType)
     ? await bindings.listQualifiedModels(companyId, adapterType)
-    : await listAdapterModels(adapterType);
->>>>>>> joe
+    : await listAdapterModels(agentHarnessType(adapterType, adapterConfig));
   if (models.length === 0 || models.some((candidate) => candidate.id === model)) return;
 
   throw unprocessable(`Model "${model}" is not available for adapter ${adapterType}.`, {

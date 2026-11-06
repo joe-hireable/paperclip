@@ -398,14 +398,7 @@ const JSON_SECRET_FIELD_TEXT_RE = new RegExp(
   "gi",
 );
 const ESCAPED_JSON_SECRET_FIELD_TEXT_RE = new RegExp(
-<<<<<<< upstream+partial-joe
-  String.raw`((?:\\")?${SECRET_FIELD_NAME_START}${SECRET_FIELD_NAME_PATTERN}(?:\\")?\s*:\s*(?:\\"))[^\\\r\n]+((?:\\"))`,
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  String.raw`((?:\\")?${SECRET_FIELD_NAME_PATTERN}(?:\\")?\s*:\s*(?:\\"))[^\\\r\n]+((?:\\"))`,
-+++ joe:
-  String.raw`((?:\\+")?${SECRET_FIELD_NAME_PATTERN}(?:\\+")?\s*:\s*(?:\\+"))[^\\\r\n]+((?:\\+"))`,
->>>>>>> joe
+  String.raw`((?:\\+")?${SECRET_FIELD_NAME_START}${SECRET_FIELD_NAME_PATTERN}(?:\\+")?\s*:\s*(?:\\+"))[^\\\r\n]+((?:\\+"))`,
   "gi",
 );
 const SECRET_TEXT_HINTS = [

@@ -12359,16 +12359,10 @@ export function issueService(db: Db) {
         .where(eq(issues.id, id))
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
-<<<<<<< upstream+partial-joe
+      if (["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"].includes(issueCompany.originKind)) throw conflict("Project conversations cannot be checked out");
       await assertAssignableAgent(db, issueCompany.companyId, agentId, {
         kind: "work",
       });
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-      await assertAssignableAgent(db, issueCompany.companyId, agentId, { kind: "work" });
-+++ joe:
-      if (["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"].includes(issueCompany.originKind)) throw conflict("Project conversations cannot be checked out");
->>>>>>> joe
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
@@ -12438,7 +12432,6 @@ export function issueService(db: Db) {
             eq(issues.executionRunId, checkoutRunId),
           )
         : isNull(issues.executionRunId);
-<<<<<<< upstream+partial-joe
       const updated = await db.transaction(async tx => {
         await notifyStatusCardIssueChange(tx, issueCompany.companyId);
         await notifyIssueAttentionRetentionWork(tx, { companyId: issueCompany.companyId, issueId: id });
@@ -12461,6 +12454,7 @@ export function issueService(db: Db) {
           .where(
             and(
               eq(issues.id, id),
+              notInArray(issues.originKind, ["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"]),
               inArray(issues.status, expectedStatuses),
               or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
               executionLockCondition,
@@ -12469,17 +12463,6 @@ export function issueService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
       });
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        .where(
-          and(
-            eq(issues.id, id),
-            inArray(issues.status, expectedStatuses),
-            or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
-            executionLockCondition,
-+++ joe:
-            notInArray(issues.originKind, ["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"]),
->>>>>>> joe
 
       if (updated) {
         const [enriched] = await withIssueLabels(db, [updated]);
@@ -12589,7 +12572,6 @@ export function issueService(db: Db) {
           if (current.status !== "in_progress") {
             adoptionSet.startedAt = now;
           }
-<<<<<<< upstream+partial-joe
           const staleExecutionRunId = current.executionRunId;
           const adopted = await db.transaction(async tx => {
             await tx.execute(sql`select ${issues.id} from ${issues} where ${issues.id} = ${id}
@@ -12609,6 +12591,7 @@ export function issueService(db: Db) {
               .where(
                 and(
                   eq(issues.id, id),
+                  notInArray(issues.originKind, ["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"]),
                   inArray(issues.status, expectedStatuses),
                   eq(issues.executionRunId, staleExecutionRunId),
                   or(
@@ -12620,17 +12603,6 @@ export function issueService(db: Db) {
               .returning()
               .then((rows) => rows[0] ?? null);
           });
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-            .where(
-              and(
-                eq(issues.id, id),
-                inArray(issues.status, expectedStatuses),
-                eq(issues.executionRunId, current.executionRunId),
-                or(isNull(issues.assigneeAgentId), eq(issues.assigneeAgentId, agentId)),
-+++ joe:
-                notInArray(issues.originKind, ["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"]),
->>>>>>> joe
           if (adopted) {
             const [enriched] = await withIssueLabels(db, [adopted]);
             return enriched;

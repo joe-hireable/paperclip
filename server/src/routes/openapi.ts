@@ -814,7 +814,26 @@ const importRequestBody = (schema: z.ZodTypeAny) => ({
 
 const r = responses;
 
-<<<<<<< upstream+partial-joe
+const projectCoordinationReadinessSchema = z.object({
+  companyId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  leadAgentId: z.string().uuid().nullable(),
+  revision: z.number().int().nonnegative(),
+  policy: projectCoordinationPolicySchema.nullable(),
+  executionReady: z.literal(false),
+  readinessReasons: z.array(z.string()),
+}).strict();
+
+// Ordinary issue/comment responses retain their broad compatibility fields.
+const coordinatorIntakeResponseFields = {
+  coordinatorIntake: z.record(z.string(), z.unknown()).optional(),
+  intakeRequestId: z.string().uuid().optional(),
+};
+const coordinatorIntakeDescription = "For a project master conversation, board-authored input atomically creates the comment and an unassigned blocked intake child; no execution is dispatched. "
+  + "Reuse the same intakeRequestId UUID with identical text and author to return the same comment and child; conflicting reuse returns 409. Requests without a UUID are distinct submissions. "
+  + "Archived projects return 409; mixed issue changes or structured metadata return 422. Intake requests permit only comment/body and intakeRequestId, plus inert false reopen/resume/interrupt flags or authorType=user. "
+  + "The response adds coordinatorIntake and intakeRequestId only for master intake; a replay may return a subsequently cancelled child. Ordinary issue comments retain their existing authorization and behaviour.";
+
 const externalObjectSummariesBodySchema = z
   .object({
     issueIds: z.array(z.string().guid()).max(1000),
@@ -907,33 +926,6 @@ const chatEndpointCredentialHandoffSchema = z.object({
     continuation: z.string(),
   }),
 });
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-const externalObjectSummariesBodySchema = z.object({
-  issueIds: z.array(z.string().guid()).max(1000),
-}).strict();
-+++ joe:
-const projectCoordinationReadinessSchema = z.object({
-  companyId: z.string().uuid(),
-  projectId: z.string().uuid(),
-  leadAgentId: z.string().uuid().nullable(),
-  revision: z.number().int().nonnegative(),
-  policy: projectCoordinationPolicySchema.nullable(),
-  executionReady: z.literal(false),
-  readinessReasons: z.array(z.string()),
-}).strict();
-
-// Ordinary issue/comment responses retain their broad compatibility fields.
-const coordinatorIntakeResponseFields = {
-  coordinatorIntake: z.record(z.string(), z.unknown()).optional(),
-  intakeRequestId: z.string().uuid().optional(),
-};
-const coordinatorIntakeDescription = "For a project master conversation, board-authored input atomically creates the comment and an unassigned blocked intake child; no execution is dispatched. "
-  + "Reuse the same intakeRequestId UUID with identical text and author to return the same comment and child; conflicting reuse returns 409. Requests without a UUID are distinct submissions. "
-  + "Archived projects return 409; mixed issue changes or structured metadata return 422. Intake requests permit only comment/body and intakeRequestId, plus inert false reopen/resume/interrupt flags or authorType=user. "
-  + "The response adds coordinatorIntake and intakeRequestId only for master intake; a replay may return a subsequently cancelled child. Ordinary issue comments retain their existing authorization and behaviour.";
-
->>>>>>> joe
 
 const chatEndpointResponseSchema = z
   .object({
@@ -4396,15 +4388,21 @@ registry.registerPath({
   tags: ["issues"],
   summary: "Update an issue",
   description:
-    "When posting a comment, attachmentIds selects up to 20 unique uploaded attachments from this exact task and company. The comment, attachment binding, and issue update commit atomically. attachmentIds without a comment is rejected; Markdown links alone do not bind uploads. For a prepared backlog task, send exactly status=todo and expectedStatusVersion from the task response. The locked promotion returns 409 if the status or assignment changed. Other mutation fields with this guard return 422.",
+    "When posting a comment, attachmentIds selects up to 20 unique uploaded attachments from this exact task and company. The comment, attachment binding, and issue update commit atomically. attachmentIds without a comment is rejected; Markdown links alone do not bind uploads. For a prepared backlog task, send exactly status=todo and expectedStatusVersion from the task response. The locked promotion returns 409 if the status or assignment changed. Other mutation fields with this guard return 422. " +
+    coordinatorIntakeDescription + " Master intake uses the comment field and returns comment plus changes: {} alongside the issue.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(updateIssueSchema.partial()),
   },
   responses: {
-    200: r.ok(),
+    200: r.ok(z.object({
+      ...coordinatorIntakeResponseFields,
+      comment: z.record(z.string(), z.unknown()).nullable().optional(),
+      changes: z.record(z.string(), z.unknown()).optional(),
+    }).passthrough()),
     400: r.badRequest,
     401: r.unauthorized,
+    403: r.forbidden,
     404: r.notFound,
     409: r.conflict,
     422: r.unprocessable,
@@ -4452,14 +4450,7 @@ registry.registerPath({
   method: "get",
   path: "/api/issues/{id}/runner-goal",
   tags: ["issues"],
-<<<<<<< upstream+partial-joe
   summary: "Get the effective agent session goal for an issue",
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  summary: "Update an issue",
-+++ joe:
-  description: coordinatorIntakeDescription + " Master intake uses the comment field and returns comment plus changes: {} alongside the issue.",
->>>>>>> joe
   request: {
     params: z.object({ id: z.string() }),
     query: z.object({ agentId: z.string().optional() }),
@@ -4470,17 +4461,6 @@ registry.registerPath({
     403: r.forbidden,
     404: r.notFound,
   },
-<<<<<<< upstream+partial-joe
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
-+++ joe:
-  responses: { 200: r.ok(z.object({
-    ...coordinatorIntakeResponseFields,
-    comment: z.record(z.string(), z.unknown()).nullable().optional(),
-    changes: z.record(z.string(), z.unknown()).optional(),
-  }).passthrough()), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
->>>>>>> joe
 });
 
 registry.registerPath({
@@ -5277,17 +5257,26 @@ registry.registerPath({
 registry.registerPath({
   method: "get",
   path: "/api/projects/{id}/conversation",
+  tags: ["projects"],
   summary: "Get the permanent project conversation",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
+registry.registerPath({
+  method: "get",
   path: "/api/projects/{id}/coordination-policy",
+  tags: ["projects"],
   summary: "Read project coordination policy and readiness",
   description: "Board-only project read. Returns the configured route/skill pins and current unavailability reasons without reserving capacity, probing accounts or launching work. Archived projects remain readable. Ordinary project responses expose only the safe coordination summary.",
+  request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(projectCoordinationReadinessSchema), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
+registry.registerPath({
   method: "put",
   path: "/api/projects/{id}/coordination-policy",
+  tags: ["projects"],
   summary: "Replace project coordination policy with revision checking",
   description: "Board-only; requires project read and runtime management permission. expectedRevision must match the current revision; stale revisions or archived projects return 409. "
     + "A non-null policy requires a same-company lead role, distinct same-company binding pins and exact skill versions; invalid references return 422. Nullable policy clears the policy. "
@@ -5296,14 +5285,21 @@ registry.registerPath({
   responses: { 200: r.ok(projectCoordinationReadinessSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
+registry.registerPath({
+  method: "post",
   path: "/api/projects/{id}/conversation",
+  tags: ["projects"],
   summary: "Create or adopt the permanent project conversation",
   description: "Board-only operation. Ensures one permanent master issue without enabling coordinator execution.",
+  request: {
+    params: z.object({ id: z.string() }),
     body: jsonBody(ensureProjectConversationSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
+registry.registerPath({
+  method: "get",
   path: "/api/projects/{id}/workspaces",
   tags: ["projects"],
   summary: "List project workspaces",

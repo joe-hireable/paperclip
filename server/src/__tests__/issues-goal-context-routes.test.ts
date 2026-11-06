@@ -306,6 +306,7 @@ describe("issue goal context routes", () => {
       },
     };
     mockIssueService.getById.mockResolvedValueOnce({
+      ...legacyProjectLinkedIssue,
       description,
       assigneeAdapterOverrides,
       executionWorkspaceId: "66666666-6666-4666-8666-666666666666",
@@ -319,10 +320,12 @@ describe("issue goal context routes", () => {
       source: "agent_key",
     } : {})).get(`/api/issues/${legacyProjectLinkedIssue.id}?view=execution-authority`);
 
+    expect(res.status).toBe(200);
     expect(res.body).toEqual({
       id: legacyProjectLinkedIssue.id,
       companyId: "company-1",
       projectId: legacyProjectLinkedIssue.projectId,
+      assigneeAgentId: legacyProjectLinkedIssue.assigneeAgentId,
       status: "todo",
       description,
       assigneeAdapterOverrides,

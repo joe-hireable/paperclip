@@ -1,15 +1,6 @@
-<<<<<<< upstream+partial-joe
 import { sql } from "drizzle-orm";
-import { pgTable, uuid, text, timestamp, date, index, jsonb, check, uniqueIndex } from "drizzle-orm/pg-core";
-import type { AgentEnvConfig } from "@paperclipai/shared";
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-import { pgTable, uuid, text, timestamp, date, index, jsonb } from "drizzle-orm/pg-core";
-import type { AgentEnvConfig } from "@paperclipai/shared";
-+++ joe:
-import { pgTable, uuid, text, timestamp, date, index, jsonb, integer } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, date, index, jsonb, check, uniqueIndex, integer } from "drizzle-orm/pg-core";
 import type { AgentEnvConfig, ProjectCoordinationPolicy } from "@paperclipai/shared";
->>>>>>> joe
 import { companies } from "./companies.js";
 import { goals } from "./goals.js";
 import { agents } from "./agents.js";

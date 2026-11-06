@@ -6,8 +6,6 @@ import { useWorkspaceIsolationControls } from "@/hooks/useWorkspaceIsolationCont
 import { AgentIdentity } from "@/components/AgentIdentity";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { normalizeLegacyRunnerProvider } from "@paperclipai/adapter-utils";
-import { ExecutionBindingSelector } from "../ExecutionBindingSelector";
-import { boundTaskOverrides, requiresTaskBinding } from "../../lib/execution-binding-task";
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
 import { PROPERTIES_PANE_HEADER_SLOT_ID } from "../PropertiesPanel";
@@ -204,7 +202,7 @@ interface IssuePropertiesProps {
   childIssues?: Issue[];
   issueLinkState?: unknown;
   onAddSubIssue?: () => void;
-  onUpdate: (data: Record<string, unknown>) => void | Promise<unknown>;
+  onUpdate: (data: Record<string, unknown>) => void;
   inline?: boolean;
   /** Whether an agent run is currently in flight on this issue, so the assignee
    * picker can warn that reassigning will interrupt it. */
@@ -759,17 +757,9 @@ export function IssueProperties({
   const nativeCatalog = nativeTaskModelCatalogOptions(assignee);
   const assigneeAdapterType = assignee?.adapterType ?? null;
   const assigneeAdapterOverrides = issue.assigneeAdapterOverrides ?? null;
-  const bindingRequired = requiresTaskBinding(assignee) || Boolean(assigneeAdapterOverrides?.executionBinding);
-  const showAssigneeAdapterOptions = !bindingRequired && assigneeAdapterOverrides !== null;
+  const showAssigneeAdapterOptions = assigneeAdapterOverrides !== null;
   const supportsAssigneeOverrides = Boolean(
-<<<<<<< upstream+partial-joe
     assigneeAdapterType && (ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType) || nativeCatalog),
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    assigneeAdapterType && ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType),
-+++ joe:
-    !bindingRequired && assigneeAdapterType && ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType),
->>>>>>> joe
   );
   const assigneeOverrideLane = overrideLane(assigneeAdapterOverrides);
   const assigneeOverrideAdapterConfig = asRecord(assigneeAdapterOverrides?.adapterConfig);
@@ -2385,17 +2375,6 @@ export function IssueProperties({
             showLabel
           />
         </PropertyRow>
-
-        {bindingRequired && companyId && issue.assigneeAgentId && (
-          <ExecutionBindingSelector
-            key={JSON.stringify([issue.id, issue.assigneeAgentId, issue.projectId, issue.projectWorkspaceId, issue.title, issue.description])}
-            companyId={companyId} agentId={issue.assigneeAgentId}
-            contextKey={JSON.stringify([issue.id, issue.assigneeAgentId, issue.projectId, issue.projectWorkspaceId, issue.title, issue.description])}
-            value={assigneeAdapterOverrides?.executionBinding}
-            disabled={hasActiveRun || !issue.projectId || !issue.projectWorkspaceId || hideHostPaths}
-            onSelect={selection => onUpdate({ assigneeAdapterOverrides: selection ? boundTaskOverrides(selection) : null, status: "backlog" })}
-          />
-        )}
 
         {/* PAP-411: priority UI is hidden behind SHOW_TASK_PRIORITY_UI. Revive by flipping the flag. */}
         {SHOW_TASK_PRIORITY_UI && (

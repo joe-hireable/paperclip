@@ -1,18 +1,8 @@
-<<<<<<< upstream+partial-joe
 import { usePrimaryAgentPresentation } from "./primary-agent/PrimaryAgentPresentation";
 import { useWorkspaceIsolationControls } from "@/hooks/useWorkspaceIsolationControls";
 import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAccountBoundMutation } from "@/hooks/useAccountBoundMutation";
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-import { memo, useState, useEffect, useRef, useCallback, useMemo, type ChangeEvent, type CSSProperties, type DragEvent, type RefObject } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-+++ joe:
-import type { ExecutionBindingSelection } from "@paperclipai/shared/execution-bindings";
-import { ExecutionBindingSelector } from "./ExecutionBindingSelector";
-import { boundTaskOverrides, requiresTaskBinding } from "../lib/execution-binding-task";
->>>>>>> joe
 import type { AgentEnvConfig, EnvBinding, IssueWorkMode } from "@paperclipai/shared";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
@@ -492,20 +482,9 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
   const [executionWorkspaceMode, setExecutionWorkspaceMode] = useState<string>("shared_workspace");
   const [selectedExecutionWorkspaceId, setSelectedExecutionWorkspaceId] = useState("");
   const [workMode, setWorkMode] = useState<IssueWorkMode>("standard");
-<<<<<<< upstream+partial-joe
   const [isPrivate, setIsPrivate] = useState(false);
   const { isMobile } = useSidebar();
   const [composerSettings, setComposerSettings] = useState<ComposerRunSettings | null>(null);
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  const [expanded, setExpanded] = useState(false);
-  const [dialogCompanyId, setDialogCompanyId] = useState<string | null>(null);
-  const [stagedFiles, setStagedFiles] = useState<StagedIssueFile[]>([]);
-  const [isFileDragOver, setIsFileDragOver] = useState(false);
-+++ joe:
-  const [bindingSelection, setBindingSelection] = useState<{ context: string; selection: ExecutionBindingSelection } | null>(null);
-  const [bindingInputRevision, setBindingInputRevision] = useState(0);
->>>>>>> joe
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const executionWorkspaceDefaultProjectId = useRef<string | null>(null);
   const initializationKeyRef = useRef<string | null>(null);
@@ -620,21 +599,7 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     () => (agents ?? []).find((agent) => agent.id === selectedAssigneeAgentId) ?? null,
     [agents, selectedAssigneeAgentId],
   );
-  const bindingRequired = requiresTaskBinding(selectedAssigneeAgent);
-  const bindingContext = JSON.stringify([effectiveCompanyId, selectedAssigneeAgentId, projectId, projectWorkspaceId, bindingInputRevision, stagedFiles.map(file => [file.file.name, file.file.size, file.file.lastModified])]);
-  const qualifiedBinding = bindingSelection?.context === bindingContext ? bindingSelection.selection : null;
   const assigneeAdapterType = selectedAssigneeAgent?.adapterType ?? null;
-<<<<<<< upstream+partial-joe
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    : "";
-  const effectiveAssigneeModel = assigneeModelOverride || assigneePrimaryModel;
-  const supportsAssigneeOverrides = Boolean(
-    assigneeAdapterType && ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType),
-  );
-+++ joe:
-    !bindingRequired && assigneeAdapterType && ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType),
->>>>>>> joe
   const mentionOptions = useMemo<MentionOption[]>(() => {
     return buildMarkdownMentionOptions({
       agents,
@@ -848,7 +813,6 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     ],
   );
 
-<<<<<<< upstream+partial-joe
   const handleDescriptionChange = useCallback(
     (nextDescription: string) => {
       descriptionRef.current = nextDescription;
@@ -858,25 +822,6 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     },
     [queueDraftSave],
   );
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-
-  const handleDescriptionChange = useCallback((nextDescription: string) => {
-    descriptionRef.current = nextDescription;
-    const nextDraftHasText = titleRef.current.trim().length > 0 || nextDescription.trim().length > 0;
-    setDraftHasText((current) => current === nextDraftHasText ? current : nextDraftHasText);
-    queueDraftSave({ description: nextDescription });
-+++ joe:
-    setBindingInputRevision(value => value + 1);
---- base ctx:
-  const handleTitleChange = useCallback((nextTitle: string) => {
-    titleRef.current = nextTitle;
-    const nextTitleHasText = nextTitle.trim().length > 0;
-    const nextDraftHasText = nextTitleHasText || descriptionRef.current.trim().length > 0;
-    setTitleHasText((current) => current === nextTitleHasText ? current : nextTitleHasText);
-+++ joe:
-    setBindingInputRevision(value => value + 1);
->>>>>>> joe
 
   // Save draft on meaningful changes
   useEffect(() => {
@@ -1079,8 +1024,6 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     unboundFormDraft.current = null;
     createRequestRef.current = null; setRestoredLaunch(null);
     if (awaitingFilesKey) clearPendingSend(awaitingFilesKey);
-    setBindingSelection(null);
-    setBindingInputRevision(value => value + 1);
     setIssueText("", "");
     setStatus("todo");
     setPriority("");
@@ -1112,20 +1055,9 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
 
   async function handleSubmit(body: string, mode: IssueWorkMode, settings: ComposerRunSettings | null) {
     const currentTitle = titleRef.current.trim();
-<<<<<<< upstream+partial-joe
     const currentDescription = body.trim();
     if (!effectiveCompanyId || filesRestoring || (!currentTitle && !currentDescription) || createIssue.isPending || durableCreate.pending || worktreeSelectionIncomplete || parentPrivacyUnresolved) return;
     const inheritedOverrides = buildAssigneeAdapterOverrides({
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    const currentDescription = descriptionRef.current.trim();
-    if (!effectiveCompanyId || !currentTitle || createIssue.isPending) return;
-    const assigneeAdapterOverrides = buildAssigneeAdapterOverrides({
-+++ joe:
-    const assigneeAdapterOverrides = bindingRequired
-      ? qualifiedBinding ? boundTaskOverrides(qualifiedBinding) : null
-      : buildAssigneeAdapterOverrides({
->>>>>>> joe
       adapterType: assigneeAdapterType,
       lane: assigneeChrome ? "custom" : assigneeModelLane,
       modelOverride: assigneeModelOverride,
@@ -1170,7 +1102,7 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
       companyId: effectiveCompanyId,
       ...(currentTitle ? { title: currentTitle } : {}),
       description: currentDescription || undefined,
-      status: bindingRequired ? "backlog" : status,
+      status,
       priority: priority || "medium",
       workMode: mode,
       ...(effectivePrivate ? { visibility: "private" } : {}),
@@ -1567,7 +1499,6 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
                           }}
                         />
                       ) : null}
-<<<<<<< upstream+partial-joe
                       {resendError && !durableCreate.pending ? (
                         <div>
                           <p role="alert" className="text-sm text-destructive">{resendError.title}. {resendError.body}</p>
@@ -1604,22 +1535,6 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
                             {newIssueDefaults.parentTitle ? (
                               <div className="pl-5 text-foreground/80 truncate">{newIssueDefaults.parentTitle}</div>
                             ) : null}
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-            </div>
-          )}
-
-          {supportsAssigneeOverrides && (
-            <div className="px-4 pb-2">
-            <button
-+++ joe:
-          {bindingRequired && effectiveCompanyId && selectedAssigneeAgentId && (
-            <div className="px-4 pb-2 space-y-2">
-              <ExecutionBindingSelector key={bindingContext} companyId={effectiveCompanyId} agentId={selectedAssigneeAgentId} contextKey={bindingContext} disabled={!projectId || !projectWorkspaceId || experimentalSettings?.enableManagedSandboxOnly === true} onSelect={selection => setBindingSelection(selection ? { context: bindingContext, selection } : null)} />
-              <p className="text-xs text-muted-foreground">This task will be created in backlog. Review its saved files and execution in properties before starting. Paused roles stay paused.</p>
-            </div>
-          )}
->>>>>>> joe
                           </div>
                         </div>
                       ) : null}

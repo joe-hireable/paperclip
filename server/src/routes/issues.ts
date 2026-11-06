@@ -3642,15 +3642,6 @@ export function issueRoutes(
     await executeIssuePostCommitActions(db, actions);
   };
 
-<<<<<<< upstream+partial-joe
-  const memoizeIssueRead = createRequestPromiseMemo<
-    Request,
-    Awaited<ReturnType<typeof svc.getById>>
-  >({
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  const memoizeIssueRead = createRequestPromiseMemo<Request, Awaited<ReturnType<typeof svc.getById>>>({
-+++ joe:
   async function acceptCoordinatorIntake(req: Request, issue: Awaited<ReturnType<typeof svc.getById>>, body: string, patch: boolean) {
     if (!issue || issue.originKind !== "project_master_chat") return null;
     const allowed = new Set(patch ? ["comment", "intakeRequestId"] : ["body", "intakeRequestId"]);
@@ -3666,7 +3657,10 @@ export function issueRoutes(
     return accepted;
   }
 
->>>>>>> joe
+  const memoizeIssueRead = createRequestPromiseMemo<
+    Request,
+    Awaited<ReturnType<typeof svc.getById>>
+  >({
     shouldCache: (issue) => issue !== null,
   });
   const memoizeIssueReadDecision = createRequestPromiseMemo<
@@ -9716,8 +9710,24 @@ export function issueRoutes(
       "Issue not found",
     );
     if (!issue) return;
-<<<<<<< upstream+partial-joe
     if (!(await timing.time("authorization", () => assertIssueReadAllowed(req, res, issue, { allowBreakGlass: true })))) return;
+    const view = req.query.view;
+    if (view !== undefined && view !== "execution-authority" && view !== "core") {
+      res.status(400).json({ error: "Invalid issue view" });
+      return;
+    }
+    if (view === "execution-authority") {
+      res.json({
+        id: issue.id,
+        companyId: issue.companyId,
+        projectId: issue.projectId,
+        assigneeAgentId: issue.assigneeAgentId,
+        status: issue.status,
+        description: issue.description,
+        assigneeAdapterOverrides: issue.assigneeAdapterOverrides,
+      });
+      return;
+    }
     // Saved cards are structural conversation data. Include their local
     // projection before first paint, independently of slow recovery, workspace
     // and related-task enrichment. This never refreshes external providers.
@@ -9734,31 +9744,6 @@ export function issueRoutes(
       req.actor.type === "board" && req.actor.userId
         ? timing.time("inbox", () => svc.getActiveInboxArchiveFields(issue, req.actor.userId!))
         : Promise.resolve({});
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
-    const inboxArchiveFieldsPromise = req.actor.type === "board" && req.actor.userId
-      ? svc.getActiveInboxArchiveFields(issue, req.actor.userId)
-      : Promise.resolve({});
-+++ joe:
-    const view = req.query.view;
-    if (view !== undefined && view !== "execution-authority") {
-      res.status(400).json({ error: "Invalid issue view" });
-      return;
-    }
-    if (view === "execution-authority") {
-      res.json({
-        id: issue.id,
-        companyId: issue.companyId,
-        projectId: issue.projectId,
-        assigneeAgentId: issue.assigneeAgentId,
-        status: issue.status,
-        description: issue.description,
-        assigneeAdapterOverrides: issue.assigneeAdapterOverrides,
-      });
-      return;
-    }
->>>>>>> joe
     const [
       { project, goal },
       ancestors,
@@ -14315,21 +14300,7 @@ export function issueRoutes(
         "Use paperclip_block for a blocker. Paperclip sets the task status from that report.",
       { code: "native_run_status_reported_by_finish", requestedStatus },
     );
-<<<<<<< upstream+partial-joe
   }
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    if (!issueMutationAccess) return;
-    const issueMutationAuthorizationReason = req.actor.type === "agent"
-      ? issueWriteAuthorizationReason(req, await decideIssueAccess(req, existing, "issue:mutate"))
-      : issueWriteAuthorizationReason(req, true);
-+++ joe:
-    if (existing.originKind === "project_master_chat" && req.body.comment) {
-      const intake = await acceptCoordinatorIntake(req, existing, req.body.comment, true);
-      res.json({ ...existing, comment: intake!.comment, coordinatorIntake: intake!.intake, intakeRequestId: intake!.requestId, changes: {} });
-      return;
-    }
->>>>>>> joe
 
   router.patch(
     "/issues/:id",
@@ -14412,6 +14383,11 @@ export function issueRoutes(
         { allowVisibleIssueWrite: true },
       );
       if (!issueMutationAccess) return;
+      if (existing.originKind === "project_master_chat" && req.body.comment) {
+        const intake = await acceptCoordinatorIntake(req, existing, req.body.comment, true);
+        res.json({ ...existing, comment: intake!.comment, coordinatorIntake: intake!.intake, intakeRequestId: intake!.requestId, changes: {} });
+        return;
+      }
       if (req.body.comment && !(await assertBoardCommentNotPaused(req, res, existing))) return;
       const issueMutationAuthorizationReason =
         req.actor.type === "agent"
@@ -14435,10 +14411,10 @@ export function issueRoutes(
       const existingRelations = Array.isArray(req.body.blockedByIssueIds)
         ? await svc.getRelationSummaries(existing.id)
         : null;
-<<<<<<< upstream+partial-joe
       const {
         comment: commentBody,
         commentClientRequestId,
+        intakeRequestId: _intakeRequestId,
         attachmentIds: commentAttachmentIds,
         reviewInteractionId: requestedReviewInteractionId,
         reviewRequest,
@@ -14524,16 +14500,6 @@ export function issueRoutes(
         actor: req.actor,
         action: "project:read",
         resource: { type: "project", companyId: existing.companyId, projectId: selectedProject.id },
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    const {
-      comment: commentBody,
-      reviewInteractionId: requestedReviewInteractionId,
-      reviewRequest,
-      reopen: reopenRequested,
-+++ joe:
-      intakeRequestId: _intakeRequestId,
->>>>>>> joe
       });
       if (!projectDecision.allowed) {
         res.status(404).json({ error: "Project not found" });
@@ -19133,7 +19099,6 @@ export function issueRoutes(
     res.json(bundle);
   });
 
-<<<<<<< upstream+partial-joe
   router.get("/companies/:companyId/chats", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -19142,21 +19107,6 @@ export function issueRoutes(
     const conversations = await svc.listConversations(companyId, req.actor.userId);
     res.json(await withConversationReadState(db, companyId, req.actor.userId, await filterIssuesForActor(req, conversations)));
   });
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-    }
-    const commentAccessDecision = await assertAgentIssueCommentAllowed(req, res, issue);
-    if (!commentAccessDecision) return;
-    const commentAuthorizationReason = issueWriteAuthorizationReason(req, commentAccessDecision);
-    if (!assertStructuredCommentFieldsAllowed(req, res, {
-      presentation: req.body.presentation,
-+++ joe:
-    if (issue.originKind === "project_master_chat") {
-      const intake = await acceptCoordinatorIntake(req, issue, req.body.body, false);
-      res.status(201).json({ ...intake!.comment, coordinatorIntake: intake!.intake, intakeRequestId: intake!.requestId });
-      return;
-    }
->>>>>>> joe
 
   // GET stays read-only. POST resolves the single chat on explicit add or first send/upload.
   for (const method of ["get", "post"] as const) {
@@ -19257,6 +19207,11 @@ export function issueRoutes(
         issue,
       );
       if (!commentAccessDecision) return;
+      if (issue.originKind === "project_master_chat") {
+        const intake = await acceptCoordinatorIntake(req, issue, req.body.body, false);
+        res.status(201).json({ ...intake!.comment, coordinatorIntake: intake!.intake, intakeRequestId: intake!.requestId });
+        return;
+      }
       const commentAuthorizationReason = issueWriteAuthorizationReason(
         req,
         commentAccessDecision,

@@ -127,18 +127,12 @@ export function signalRunningProcess(
   running: Pick<RunningProcess, "child" | "processGroupId" | "signalOwnedGroup">,
   signal: NodeJS.Signals,
 ) {
-<<<<<<< upstream+partial-joe
+  if (running.signalOwnedGroup) return running.signalOwnedGroup(signal);
   if (
     process.platform !== "win32" &&
     running.processGroupId &&
     running.processGroupId > 0
   ) {
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  if (process.platform !== "win32" && running.processGroupId && running.processGroupId > 0) {
-+++ joe:
-  if (running.signalOwnedGroup) return running.signalOwnedGroup(signal);
->>>>>>> joe
     try {
       process.kill(-running.processGroupId, signal);
       return;
@@ -4786,21 +4780,15 @@ export async function runChildProcess(
     localProcessSandbox?: LocalProcessSandboxOptions | null;
   },
 ): Promise<RunProcessResult> {
-<<<<<<< upstream+partial-joe
-  const onLogError =
-    opts.onLogError ??
-    ((err, id, msg) => console.warn({ err, runId: id }, msg));
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
-+++ joe:
   if (opts.cleanupOwnedProcessGroup && (process.platform !== "linux" || opts.remoteExecution
     || opts.localProcessSandbox || opts.terminalResultCleanup || !opts.onSpawn
     || !Number.isFinite(opts.timeoutSec) || opts.timeoutSec <= 0
     || !Number.isFinite(opts.graceSec) || opts.graceSec < 0)) {
     throw new Error("owned process-group cleanup requires bounded Linux local execution and onSpawn");
   }
->>>>>>> joe
+  const onLogError =
+    opts.onLogError ??
+    ((err, id, msg) => console.warn({ err, runId: id }, msg));
   return new Promise<RunProcessResult>((resolve, reject) => {
     const rawMerged: NodeJS.ProcessEnv = {
       ...sanitizeInheritedPaperclipEnv(process.env),
@@ -4859,42 +4847,25 @@ export async function runChildProcess(
         let spawnPersistFailed = false;
         const spawnPersistPromise =
           typeof child.pid === "number" && child.pid > 0 && opts.onSpawn
-<<<<<<< upstream+partial-joe
-            ? opts
-                .onSpawn({ pid: child.pid, processGroupId, startedAt })
+            ? (ownedMarker
+                ? Promise.resolve().then(() => opts.onSpawn!({ pid: child.pid!, processGroupId, startedAt }))
+                : opts.onSpawn({ pid: child.pid, processGroupId, startedAt }))
                 .catch((err) => {
+                  spawnPersistFailed = true;
                   onLogError(
                     err,
                     runId,
                     "failed to record child process metadata",
                   );
                 })
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-            ? opts.onSpawn({ pid: child.pid, processGroupId, startedAt }).catch((err) => {
-              onLogError(err, runId, "failed to record child process metadata");
-            })
-+++ joe:
-            ? (ownedMarker
-              ? Promise.resolve().then(() => opts.onSpawn!({ pid: child.pid!, processGroupId, startedAt }))
-              : opts.onSpawn({ pid: child.pid, processGroupId, startedAt })).catch((err) => {
-              spawnPersistFailed = true;
->>>>>>> joe
             : Promise.resolve();
 
-<<<<<<< upstream+partial-joe
-        runningProcesses.set(runId, {
+        const running: RunningProcess = {
           child,
           graceSec: opts.graceSec,
           processGroupId,
-        });
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-        runningProcesses.set(runId, { child, graceSec: opts.graceSec, processGroupId });
-+++ joe:
-        const running: RunningProcess = { child, graceSec: opts.graceSec, processGroupId };
+        };
         runningProcesses.set(runId, running);
->>>>>>> joe
 
         let timedOut = false;
         let stdout = "";
@@ -5108,10 +5079,17 @@ export async function runChildProcess(
           maybeArmTerminalResultCleanup();
         });
 
-<<<<<<< upstream+partial-joe
         child.on(
           "close",
-          (code: number | null, signal: NodeJS.Signals | null) => {
+          async (code: number | null, signal: NodeJS.Signals | null) => {
+            let ownedProcessGroupCleanup: RunProcessResult["ownedProcessGroupCleanup"];
+            if (ownedMarker && child.pid) {
+              try {
+                ownedProcessGroupCleanup = await drainOwnedGroup();
+              } catch {
+                return;
+              }
+            }
             if (timeout) clearTimeout(timeout);
             clearTerminalCleanupTimers();
             runningProcesses.delete(runId);
@@ -5127,6 +5105,7 @@ export async function runChildProcess(
                     stderr,
                     pid: child.pid ?? null,
                     startedAt,
+                    ...(ownedProcessGroupCleanup ? { ownedProcessGroupCleanup } : {}),
                     terminalResultCleanup: terminalCleanupStarted
                       ? {
                           kind: "terminal_result_cleanup",
@@ -5143,32 +5122,6 @@ export async function runChildProcess(
             });
           },
         );
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-                stderr,
-                pid: child.pid ?? null,
-                startedAt,
-                terminalResultCleanup: terminalCleanupStarted
-                  ? {
-                    kind: "terminal_result_cleanup",
-+++ joe:
-                ...(ownedProcessGroupCleanup ? { ownedProcessGroupCleanup } : {}),
---- base ctx:
-        child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
-          if (timeout) clearTimeout(timeout);
-          clearTerminalCleanupTimers();
-          runningProcesses.delete(runId);
-+++ joe:
-        child.on("close", async (code: number | null, signal: NodeJS.Signals | null) => {
-          let ownedProcessGroupCleanup: RunProcessResult["ownedProcessGroupCleanup"];
-          if (ownedMarker && child.pid) {
-            try {
-              ownedProcessGroupCleanup = await drainOwnedGroup();
-            } catch {
-              return;
-            }
-          }
->>>>>>> joe
       })
       .catch(reject);
   });

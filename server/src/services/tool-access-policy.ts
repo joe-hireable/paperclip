@@ -961,7 +961,15 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     return deleted;
   }
 
-<<<<<<< upstream+partial-joe
+  async function resolveCompanyGatewayId(companyId: string, gatewayId?: string | null): Promise<string | null> {
+    if (!gatewayId) return null;
+    const [gateway] = await db.select({ id: toolMcpGateways.id }).from(toolMcpGateways).where(and(
+      eq(toolMcpGateways.companyId, companyId),
+      eq(toolMcpGateways.id, gatewayId),
+    )).limit(1);
+    return gateway?.id ?? null;
+  }
+
   async function loadCatalogEntry(companyId: string, catalogEntryId: string, cache?: ToolAccessDecisionCache) {
     const readEntry = async () => {
       const [entry] = await db.select(catalogEntryContextColumns).from(toolCatalogEntries).where(eq(toolCatalogEntries.id, catalogEntryId));
@@ -991,20 +999,6 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
   }
 
   async function loadContext(input: ToolAccessDecisionInput, cache?: ToolAccessDecisionCache): Promise<
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  async function loadContext(input: ToolAccessDecisionInput): Promise<
-+++ joe:
-  async function resolveCompanyGatewayId(companyId: string, gatewayId?: string | null): Promise<string | null> {
-    if (!gatewayId) return null;
-    const [gateway] = await db.select({ id: toolMcpGateways.id }).from(toolMcpGateways).where(and(
-      eq(toolMcpGateways.companyId, companyId),
-      eq(toolMcpGateways.id, gatewayId),
-    )).limit(1);
-    return gateway?.id ?? null;
-  }
-
->>>>>>> joe
     | { ok: true; ctx: ToolAccessContext; redaction: RedactionResult }
     | { ok: false; decision: ToolAccessDecision; redaction: RedactionResult }
   > {
@@ -1870,7 +1864,6 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       agentId: ctx.agentId,
       issueId: ctx.issueId,
       runId: ctx.heartbeatRunId,
-      gatewayId: ctx.gatewayId,
       ...(input.runContext?.gatewayTokenId ? { gatewayTokenId: sql`(select ${toolMcpGatewayTokens.id} from ${toolMcpGatewayTokens}
         where ${toolMcpGatewayTokens.id} = ${input.runContext.gatewayTokenId} and ${toolMcpGatewayTokens.companyId} = ${ctx.companyId}
           and ${toolMcpGatewayTokens.gatewayId} = ${ctx.gatewayId})` } : {}),

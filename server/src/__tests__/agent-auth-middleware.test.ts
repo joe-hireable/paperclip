@@ -34,26 +34,11 @@ function createSelectChain(rowsForTable: (table: unknown) => unknown[]) {
 }
 
 function createDbState(input: {
-<<<<<<< upstream+partial-joe
   agent: { id: string; companyId: string; status?: string; lifecycleHolds?: string[] };
-  agentKey?: {
-    id: string;
-    agentId: string;
-    companyId: string;
-    keyHash: string;
-    responsibleUserId?: string | null;
-    scopeConfig?: unknown;
-  };
+  agentKey?: { id: string; agentId: string; companyId: string; keyHash: string; responsibleUserId?: string | null; scopeConfig?: unknown };
   run?: { id: string; companyId: string; agentId: string; responsibleUserId?: string | null;
     status?: string; contextSnapshot?: Record<string, unknown>; resultJson?: Record<string, unknown> };
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  agent: { id: string; companyId: string; status?: string };
-  agentKey?: { id: string; agentId: string; companyId: string; keyHash: string; responsibleUserId?: string | null };
-  run?: { id: string; companyId: string; agentId: string; responsibleUserId?: string | null };
-+++ joe:
   responsibleMembership?: { companyId: string; status: string; membershipRole: string };
->>>>>>> joe
 }) {
   const activity: Array<Record<string, unknown>> = [];
   const agentRow = {

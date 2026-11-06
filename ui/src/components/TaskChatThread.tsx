@@ -548,7 +548,6 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     onAttachImage,
     imageUploadHandler,
     mentions,
-    masterIntake = false,
     enableReassign,
     conversationMode,
     reassignOptions,
@@ -3611,28 +3610,6 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                 ) : null}
               </TaskChatComposerDock>
             ) : null}
-<<<<<<< upstream+partial-joe
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-                  onAttachImage={onAttachImage}
-                  onImageUpload={imageUploadHandler}
-                  mentions={mentions}
-                  enableReassign={enableReassign}
-                  reassignOptions={reassignOptions}
-                  agentMap={agentMap}
-+++ joe:
-                  masterIntake={masterIntake}
---- base ctx:
-                <TaskChatComposer
-                  onAdd={handleThreadAdd}
-                  workMode={issueWorkMode}
-                  onWorkModeChange={onWorkModeChange}
-                  disabled={Boolean(runtimeComposerDisabledReason)}
-                  disabledReason={runtimeComposerDisabledReason}
-                  onAttachImage={onAttachImage}
-+++ joe:
-                  onWorkModeChange={masterIntake ? undefined : onWorkModeChange}
->>>>>>> joe
           </div>
         </TaskChatPresentationProvider>
       </TaskChatScrollReady.Provider>

@@ -235,12 +235,6 @@ async function unregisterTestAdapter(type: string) {
 }
 
 describe("agent test-environment route", () => {
-<<<<<<< upstream+partial-joe
-  beforeAll(async () => {
-======= JOE-UNAPPLIED-EDITS (base context then joe lines)
---- base ctx:
-  beforeEach(async () => {
-+++ joe:
   it("refuses a registered harness probe before credentials, despite caller-supplied binding flags", async () => {
     const { registerServerAdapter } = await import("../adapters/index.js");
     registerServerAdapter({ ...externalAdapter, type: "cursor" });
@@ -289,7 +283,7 @@ describe("agent test-environment route", () => {
       expect(discover).not.toHaveBeenCalled(); expect(detect).not.toHaveBeenCalled();
     } finally { await unregisterTestAdapter("cursor"); }
   });
->>>>>>> joe
+  beforeAll(async () => {
     vi.resetModules();
     await loadAppModules();
   });

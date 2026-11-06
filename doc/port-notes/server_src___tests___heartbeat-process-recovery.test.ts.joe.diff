@@ -1,0 +1,51 @@
+diff --git a/server/src/__tests__/heartbeat-process-recovery.test.ts b/server/src/__tests__/heartbeat-process-recovery.test.ts
+index b207227a63..d4ddd59eac 100644
+--- a/server/src/__tests__/heartbeat-process-recovery.test.ts
++++ b/server/src/__tests__/heartbeat-process-recovery.test.ts
+@@ -5894,6 +5894,46 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
+     );
+   });
+ 
++  it.each(["cancel", "pause", "shutdown"] as const)("awaits owned-group cleanup during %s without numeric fallback", async (action) => {
++    const { agentId, runId } = await seedRunFixture({ agentStatus: "running", includeIssue: false });
++    const heartbeat = heartbeatService(db);
++    let finish!: () => void;
++    const draining = new Promise<void>((resolve) => { finish = resolve; });
++    const signalOwnedGroup = vi.fn(async () => { await draining; return { status: "gone" as const, forceKilled: false }; });
++    runningProcesses.set(runId, { child: { pid: 12345 } as ChildProcess, graceSec: 1, processGroupId: 12345, signalOwnedGroup });
++    mockTerminateLocalService.mockResolvedValue(undefined);
++    let settled = false;
++    const cancellation = (action === "cancel" ? heartbeat.cancelRun(runId)
++      : action === "pause" ? heartbeat.cancelActiveForAgent(agentId)
++      : heartbeat.drainRunningRunsForShutdown("SIGTERM", new Date(), [runId])).finally(() => { settled = true; });
++    try {
++      await vi.waitFor(() => expect(signalOwnedGroup).toHaveBeenCalledWith("SIGTERM"));
++      expect(settled).toBe(false);
++      expect(runningProcesses.has(runId)).toBe(true);
++      expect(mockTerminateLocalService).not.toHaveBeenCalled();
++      finish();
++      await cancellation;
++      expect(signalOwnedGroup).toHaveBeenCalledTimes(1);
++      expect(runningProcesses.has(runId)).toBe(false);
++    } finally { finish(); await cancellation; runningProcesses.delete(runId); }
++  });
++
++  it.each(["cancel", "pause", "shutdown"] as const)("retains ambiguous owned-group cleanup during %s without numeric fallback", async (action) => {
++    const { agentId, runId } = await seedRunFixture({ agentStatus: "running", includeIssue: false });
++    const heartbeat = heartbeatService(db);
++    const signalOwnedGroup = vi.fn(async () => { throw Object.assign(new Error("synthetic ownership uncertainty"), { code: "owned_process_group_cleanup_incomplete" }); });
++    runningProcesses.set(runId, { child: { pid: 12345 } as ChildProcess, graceSec: 1, processGroupId: 12345, signalOwnedGroup });
++    mockTerminateLocalService.mockResolvedValue(undefined);
++    try {
++      await expect(action === "cancel" ? heartbeat.cancelRun(runId)
++        : action === "pause" ? heartbeat.cancelActiveForAgent(agentId)
++        : heartbeat.drainRunningRunsForShutdown("SIGTERM", new Date(), [runId]))
++        .rejects.toMatchObject({ code: "owned_process_group_cleanup_incomplete" });
++      expect(runningProcesses.has(runId)).toBe(true);
++      expect(mockTerminateLocalService).not.toHaveBeenCalled();
++    } finally { runningProcesses.delete(runId); }
++  });
++
+   it("terminates the in-memory process before persisting cancellation status", async () => {
+     const { runId } = await seedRunFixture({
+       agentStatus: "running",
