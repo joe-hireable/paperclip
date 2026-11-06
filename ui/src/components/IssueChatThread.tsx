@@ -1,3 +1,4 @@
+import { PendingIntakeError } from "../lib/use-master-intake";
 import { useCurrentAccountGuard } from "../hooks/useAccountBoundMutation";
 import { resolveIssueChatHumanAuthor } from "@/lib/issue-chat-human-author";
 import { useCurrentWorkspaceRetry, useWorkspaceBaseRefRecovery, useWorkspaceRetry } from "./WorkspaceBaseRefRecovery";
@@ -532,6 +533,7 @@ interface IssueChatComposerProps {
   onImageUpload?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<IssueAttachment | void>;
   draftKey?: string;
+  masterIntake?: boolean;
   enableReassign?: boolean;
   reassignOptions?: InlineEntityOption[];
   currentAssigneeValue?: string;
@@ -648,6 +650,7 @@ interface IssueChatThreadProps {
   imageUploadHandler?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<IssueAttachment | void>;
   draftKey?: string;
+  masterIntake?: boolean;
   enableReassign?: boolean;
   reassignOptions?: InlineEntityOption[];
   currentAssigneeValue?: string;
@@ -4711,6 +4714,7 @@ const IssueChatComposer = forwardRef<
     onImageUpload,
     onAttachImage,
     draftKey: sharedDraftKey,
+    masterIntake = false,
     enableReassign = false,
     reassignOptions = [],
     currentAssigneeValue = "",
@@ -5910,6 +5914,7 @@ export function IssueChatThread({
   imageUploadHandler,
   onAttachImage,
   draftKey,
+  masterIntake = false,
   enableReassign = false,
   reassignOptions = [],
   currentAssigneeValue = "",
