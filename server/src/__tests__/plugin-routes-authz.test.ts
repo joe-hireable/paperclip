@@ -1,11 +1,13 @@
 import express from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
   getByKey: vi.fn(),
   upsertConfig: vi.fn(),
+  listConfigs: vi.fn(),
   getCompanySettings: vi.fn(),
   upsertCompanySettings: vi.fn(),
 }));
@@ -16,6 +18,7 @@ const mockLifecycle = vi.hoisted(() => ({
   unload: vi.fn(),
   enable: vi.fn(),
   disable: vi.fn(),
+  restartWorker: vi.fn(),
 }));
 
 const mockSecretService = vi.hoisted(() => ({
@@ -351,6 +354,70 @@ describe("plugin install and upgrade authz", () => {
       companyId: companyA,
       configJson,
     });
+  }, 20_000);
+
+  it("delivers current persisted config rather than an older save request body", async () => {
+    readyPlugin();
+    mockSecretService.syncSecretRefsForTarget.mockResolvedValue([]);
+    mockRegistry.upsertConfig.mockResolvedValue({ id: "config-1", pluginId, companyId: companyA, configJson: { enabled: true } });
+    // A second save committed while the first request was awaiting its audit.
+    mockRegistry.listConfigs.mockResolvedValue([{ companyId: companyA, configJson: { enabled: false } }]);
+    const applied: unknown[] = [];
+    const worker = { pluginId, status: "running", setProactiveCompanyScopes() {}, async call(_method: string, params: unknown) { applied.push(params); } };
+    const manager = {
+      isRunning: () => true, getWorker: () => worker, setProactiveCompanyScopes() {},
+      call: (_id: string, method: string, params: unknown) => worker.call(method, params),
+    };
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }), {}, { bridgeDeps: { workerManager: manager } });
+    const res = await request(app).post(`/api/plugins/${pluginId}/config`).send({ companyId: companyA, configJson: { enabled: true } });
+    expect(res.status).toBe(200);
+    expect(applied).toEqual([{ companyId: companyA, config: { enabled: false } }]);
+  }, 20_000);
+
+  it("reports a partial config save while still delivering another company's valid disable", async () => {
+    readyPlugin();
+    mockSecretService.syncSecretRefsForTarget.mockResolvedValue([]);
+    mockRegistry.upsertConfig.mockResolvedValue({ id: "config-1", pluginId, companyId: companyB, configJson: { enabled: false } });
+    mockRegistry.listConfigs.mockResolvedValue([
+      { companyId: companyA, configJson: { enabled: true } },
+      { companyId: companyB, configJson: { enabled: false } },
+    ]);
+    const applied: unknown[] = [];
+    const worker = { pluginId, status: "running", setProactiveCompanyScopes() {}, async call(_method: string, params: { companyId: string }) {
+      if (params.companyId === companyA) throw new JsonRpcCallError({ code: PLUGIN_RPC_ERROR_CODES.WORKER_ERROR, message: "Sensitive provider error" });
+      applied.push(params);
+    } };
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true, companyIds: [companyA, companyB] }), {}, { bridgeDeps: { workerManager: { getWorker: () => worker } } });
+    const res = await request(app).post(`/api/plugins/${pluginId}/config`).send({ companyId: companyB, configJson: { enabled: false } });
+    expect(applied).toEqual([{ companyId: companyB, config: { enabled: false } }]);
+    expect(res.status).toBe(502);
+    expect(res.body).toMatchObject({ configSaved: true, workerApplied: false, failures: [{ companyId: companyA, code: PLUGIN_RPC_ERROR_CODES.WORKER_ERROR }] });
+    expect(JSON.stringify(res.body)).not.toContain("Sensitive provider error");
+  }, 20_000);
+
+  it("reports persisted settings as unapplied when the registered worker is stopped", async () => {
+    readyPlugin();
+    mockSecretService.syncSecretRefsForTarget.mockResolvedValue([]);
+    mockRegistry.upsertConfig.mockResolvedValue({ id: "config-1", pluginId, companyId: companyA, configJson: { enabled: false } });
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }), {}, { bridgeDeps: { workerManager: { getWorker: () => ({ status: "stopped" }) } } });
+    const res = await request(app).post(`/api/plugins/${pluginId}/config`).send({ companyId: companyA, configJson: { enabled: false } });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ configSaved: true, workerApplied: false });
+  }, 20_000);
+
+  it("retains restart fallback for a worker without optional live config support", async () => {
+    readyPlugin();
+    mockSecretService.syncSecretRefsForTarget.mockResolvedValue([]);
+    mockRegistry.upsertConfig.mockResolvedValue({ id: "config-1", pluginId, companyId: companyA, configJson: {} });
+    mockRegistry.listConfigs.mockResolvedValue([{ companyId: companyA, configJson: {} }]);
+    mockLifecycle.restartWorker.mockResolvedValue(undefined);
+    const worker = { pluginId, status: "running", setProactiveCompanyScopes() {}, async call() {
+      throw new JsonRpcCallError({ code: PLUGIN_RPC_ERROR_CODES.METHOD_NOT_IMPLEMENTED, message: "Not implemented" });
+    } };
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }), {}, { bridgeDeps: { workerManager: { getWorker: () => worker } } });
+    const res = await request(app).post(`/api/plugins/${pluginId}/config`).send({ companyId: companyA, configJson: {} });
+    expect(res.status).toBe(200);
+    expect(mockLifecycle.restartWorker).toHaveBeenCalledWith(pluginId);
   }, 20_000);
 
   it("rejects plugin config saves that reference another company's secret before syncing bindings", async () => {

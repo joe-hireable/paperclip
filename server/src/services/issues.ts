@@ -11702,6 +11702,28 @@ export function issueService(db: Db) {
           if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });
         }
 
+        if (["project_coordinator_intake", "project_coordinator_attempt"].includes(receiptExisting.originKind)) {
+          const identityKeys = ["companyId", "projectId", "parentId", "originKind", "originId", "originFingerprint", "assigneeAgentId"] as const;
+          if (identityKeys.some(key => issueData[key] !== undefined && issueData[key] !== receiptExisting[key]) ||
+              issueData.assigneeAgentId != null || issueData.checkoutRunId != null || issueData.executionRunId != null ||
+              (issueData.status !== undefined && !["blocked", "cancelled"].includes(issueData.status))) {
+            throw conflict("Coordinator intake remains blocked pending qualification");
+          }
+        } else if (["project_coordinator_intake", "project_coordinator_attempt"].includes(issueData.originKind ?? "")) {
+          throw conflict("Coordinator intake identity is reserved");
+        }
+        if (receiptExisting.originKind === "project_master_chat") {
+          const identityKeys = ["companyId", "projectId", "parentId", "originKind", "originId"] as const;
+          if (
+            identityKeys.some((key) => issueData[key] !== undefined && issueData[key] !== receiptExisting[key]) ||
+            issueData.assigneeAgentId != null || issueData.checkoutRunId != null || issueData.executionRunId != null
+          ) {
+            throw conflict("Project conversations cannot be moved or assigned to an execution agent");
+          }
+        } else if (issueData.originKind === "project_master_chat") {
+          throw conflict("Use the project conversation endpoint to adopt an issue");
+        }
+
         const [previousLabelsByIssueId, previousRelationSummaries] = await Promise.all([
           nextLabelIds !== undefined
             ? labelMapForIssues(tx, [id])
@@ -12242,6 +12264,11 @@ export function issueService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        const [existing] = await tx.select({ originKind: issues.originKind }).from(issues)
+          .where(eq(issues.id, id)).for("update");
+        if (["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"].includes(existing?.originKind ?? "")) {
+          throw conflict("Project conversations are permanent and cannot be deleted");
+        }
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)
@@ -12327,14 +12354,21 @@ export function issueService(db: Db) {
       checkoutRunId: string | null,
     ) => {
       const issueCompany = await db
-        .select({ companyId: issues.companyId })
+        .select({ companyId: issues.companyId, originKind: issues.originKind })
         .from(issues)
         .where(eq(issues.id, id))
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
+<<<<<<< upstream+partial-joe
       await assertAssignableAgent(db, issueCompany.companyId, agentId, {
         kind: "work",
       });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      await assertAssignableAgent(db, issueCompany.companyId, agentId, { kind: "work" });
++++ joe:
+      if (["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"].includes(issueCompany.originKind)) throw conflict("Project conversations cannot be checked out");
+>>>>>>> joe
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
@@ -12404,6 +12438,7 @@ export function issueService(db: Db) {
             eq(issues.executionRunId, checkoutRunId),
           )
         : isNull(issues.executionRunId);
+<<<<<<< upstream+partial-joe
       const updated = await db.transaction(async tx => {
         await notifyStatusCardIssueChange(tx, issueCompany.companyId);
         await notifyIssueAttentionRetentionWork(tx, { companyId: issueCompany.companyId, issueId: id });
@@ -12434,6 +12469,17 @@ export function issueService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
       });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+        .where(
+          and(
+            eq(issues.id, id),
+            inArray(issues.status, expectedStatuses),
+            or(isNull(issues.assigneeAgentId), sameRunAssigneeCondition),
+            executionLockCondition,
++++ joe:
+            notInArray(issues.originKind, ["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"]),
+>>>>>>> joe
 
       if (updated) {
         const [enriched] = await withIssueLabels(db, [updated]);
@@ -12443,6 +12489,7 @@ export function issueService(db: Db) {
       const current = await db
         .select({
           id: issues.id,
+          originKind: issues.originKind,
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
@@ -12453,6 +12500,7 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (!current) throw notFound("Issue not found");
+      if (["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"].includes(current.originKind)) throw conflict("Project conversations cannot be checked out");
 
       if (
         current.assigneeAgentId === agentId &&
@@ -12474,6 +12522,7 @@ export function issueService(db: Db) {
           .where(
             and(
               eq(issues.id, id),
+              notInArray(issues.originKind, ["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"]),
               eq(issues.status, "in_progress"),
               eq(issues.assigneeAgentId, agentId),
               isNull(issues.checkoutRunId),
@@ -12540,6 +12589,7 @@ export function issueService(db: Db) {
           if (current.status !== "in_progress") {
             adoptionSet.startedAt = now;
           }
+<<<<<<< upstream+partial-joe
           const staleExecutionRunId = current.executionRunId;
           const adopted = await db.transaction(async tx => {
             await tx.execute(sql`select ${issues.id} from ${issues} where ${issues.id} = ${id}
@@ -12570,6 +12620,17 @@ export function issueService(db: Db) {
               .returning()
               .then((rows) => rows[0] ?? null);
           });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+            .where(
+              and(
+                eq(issues.id, id),
+                inArray(issues.status, expectedStatuses),
+                eq(issues.executionRunId, current.executionRunId),
+                or(isNull(issues.assigneeAgentId), eq(issues.assigneeAgentId, agentId)),
++++ joe:
+                notInArray(issues.originKind, ["project_master_chat", "project_coordinator_intake", "project_coordinator_attempt"]),
+>>>>>>> joe
           if (adopted) {
             const [enriched] = await withIssueLabels(db, [adopted]);
             return enriched;

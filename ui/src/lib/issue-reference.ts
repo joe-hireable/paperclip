@@ -11,10 +11,19 @@ const ISSUE_REFERENCE_TOKEN_RE = /issue:\/\/:?[^\s<>()]+|https?:\/\/[^\s<>()]+|\
 
 export function parseIssuePathIdFromPath(pathOrUrl: string | null | undefined): string | null {
   if (!pathOrUrl) return null;
+<<<<<<< upstream+partial-joe
   const value = pathOrUrl.trim();
   if (!value) return null;
   if (/^https?:\/\//i.test(value)) return null;
   const pathname = value.split(/[?#]/, 1)[0]!;
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  const pathname = pathOrUrl.trim();
+  if (!pathname) return null;
+  if (/^https?:\/\//i.test(pathname)) return null;
++++ joe:
+  const pathname = pathOrUrl.trim().split(/[?#]/, 1)[0] ?? "";
+>>>>>>> joe
 
   const segments = pathname.split("/").filter(Boolean);
   const issueIndex = segments.findIndex((segment) => segment === "issues");
@@ -30,12 +39,21 @@ export function parseIssueReferenceFromHref(
 ) {
   if (!href) return null;
   const trimmed = href.trim();
+  const suffixIndex = trimmed.search(/[?#]/);
+  const suffix = suffixIndex < 0 ? "" : trimmed.slice(suffixIndex);
   const issueSchemeMatch = trimmed.match(ISSUE_SCHEME_RE);
   if (issueSchemeMatch?.[1]) {
     const issuePathId = decodeURIComponent(issueSchemeMatch[1]);
     return {
       issuePathId,
+<<<<<<< upstream+partial-joe
       href: `/issues/${encodeURIComponent(issuePathId)}${issueSchemeMatch[2] ?? ""}`,
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      href: `/issues/${encodeURIComponent(issuePathId)}`,
++++ joe:
+      href: `/issues/${encodeURIComponent(issuePathId)}${suffix}`,
+>>>>>>> joe
     };
   }
 
@@ -43,7 +61,14 @@ export function parseIssueReferenceFromHref(
   if (pathId) {
     return {
       issuePathId: pathId,
+<<<<<<< upstream+partial-joe
       href: `/issues/${encodeURIComponent(pathId)}${trimmed.match(/[?#].*$/)?.[0] ?? ""}`,
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      href: `/issues/${encodeURIComponent(pathId)}`,
++++ joe:
+      href: `/issues/${encodeURIComponent(pathId)}${suffix}`,
+>>>>>>> joe
     };
   }
 

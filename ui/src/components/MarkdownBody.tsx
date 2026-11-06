@@ -210,7 +210,14 @@ function MarkdownIssueLink({
 
   return (
     <Link
+<<<<<<< upstream+partial-joe
       to={href}
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      to={`/issues/${identifier}`}
++++ joe:
+      to={href.replace(/^\/issues\/[^?#]+/, `/issues/${encodeURIComponent(identifier)}`)}
+>>>>>>> joe
       data-mention-kind="issue"
       disableIssueQuicklook={pending}
       data-mention-pending={pending ? "true" : undefined}
@@ -946,7 +953,14 @@ function MarkdownBodyImpl({
       }
       if (issueRef) {
         return (
+<<<<<<< upstream+partial-joe
           <MarkdownIssueLink issuePathId={issueRef.issuePathId} href={issueRef.href} documentLink={documentLink}>
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+          <MarkdownIssueLink issuePathId={issueRef.issuePathId}>
++++ joe:
+          <MarkdownIssueLink issuePathId={issueRef.issuePathId} href={issueRef.href}>
+>>>>>>> joe
             {linkChildren}
           </MarkdownIssueLink>
         );

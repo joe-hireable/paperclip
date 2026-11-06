@@ -75,6 +75,17 @@ const SETUP_FAILURE_NOTICES: Record<string, StrandedRecoveryNoticeSeed> = {
   },
 };
 
+export function buildBoundExecutionRecoveryNoticeSeed(): StrandedRecoveryNoticeSeed {
+  return {
+    body:
+      "Automatic recovery stopped because the previous run used an explicit execution binding. " +
+      "Review its effects and account reservation, reconcile if required, then create a fresh explicit attempt. " +
+      "The original run and binding are preserved; no automatic retry was started.",
+    title: "Bound attempt needs review",
+    tone: "warning",
+  };
+}
+
 export function buildImmediateExecutionPathRecoveryNoticeSeed(input: {
   status: "todo" | "in_progress";
 }): StrandedRecoveryNoticeSeed {

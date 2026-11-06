@@ -4,6 +4,7 @@ import { z } from "zod";
 import { maxStringLength } from "./text.js";
 import { ISSUE_SUMMARIES_MAX_IDS } from "../constants.js";
 
+import { executionBindingSelectionSchema } from "../execution-bindings.js";
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
   ISSUE_EXECUTION_MONITOR_CLEAR_REASONS,
@@ -307,11 +308,18 @@ export const issueExecutionWorkspaceSettingsSchema = z
 
 export const issueAssigneeAdapterOverridesSchema = z
   .object({
+<<<<<<< upstream+partial-joe
     adapterConfig: z.record(z.string(), z.unknown())
       .refine(config => !Object.prototype.hasOwnProperty.call(config, "homeMode"), "homeMode must be set by an operator on the agent, not on a task")
       .refine(config => !config.env || typeof config.env !== "object" || !Object.keys(config.env).some(key => key.toUpperCase() === "PAPERCLIP_RUNNER_PREPARED_HARNESS_HOME"), "Prepared harness homes must be provisioned by the execution environment, not on a task")
       .refine(config => !config.env || typeof config.env !== "object" || !Object.keys(config.env).some(key => ["BASH_ENV", "ZDOTDIR", "GH_CONFIG_DIR", "PAPERCLIP_GITHUB_LAUNCHER_DIR"].includes(key.toUpperCase())), "Managed shell helpers must be provisioned by the execution environment, not on a task")
       .optional(),
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+    adapterConfig: z.record(z.string(), z.unknown()).optional(),
++++ joe:
+    executionBinding: executionBindingSelectionSchema.optional(),
+>>>>>>> joe
     useProjectWorkspace: z.boolean().optional(),
   })
   .strict();
@@ -947,6 +955,7 @@ export const updateIssueSchema = objectWithoutDefaults(
     responsibleUserId: true,
     watchdog: true,
   }),
+<<<<<<< upstream+partial-joe
 )
   .partial()
   .extend({
@@ -969,6 +978,17 @@ export const updateIssueSchema = objectWithoutDefaults(
     deferWakeForGoal: z.boolean().optional(),
     hiddenAt: z.string().datetime().nullable().optional(),
   });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  requestDepth: issueRequestDepthInputSchema.optional(),
+  assigneeAgentId: z.string().trim().min(1).optional().nullable(),
+  comment: multilineTextSchema.pipe(z.string().min(1)).optional(),
+  onBehalfOfUserId: z.string().trim().min(1).optional().nullable(),
+  reviewInteractionId: z.string().guid().optional(),
+  reviewRequest: issueReviewRequestSchema.optional().nullable(),
++++ joe:
+  intakeRequestId: z.string().uuid().optional(),
+>>>>>>> joe
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;
 export type IssueExecutionWorkspaceSettings = z.infer<
@@ -1141,6 +1161,7 @@ export const markIssueReadSchema = z.object({ throughCommentId: z.uuid().optiona
 
 export const addIssueCommentSchema = z.object({
   clientRequestId: z.string().uuid().optional(),
+  intakeRequestId: z.string().uuid().optional(),
   body: multilineTextSchema.pipe(z.string().min(1)),
   attachmentIds: issueCommentAttachmentIdsSchema.optional(),
   onBehalfOfUserId: z.string().trim().min(1).optional().nullable(),

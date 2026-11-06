@@ -3769,6 +3769,31 @@ describeEmbeddedPostgres("tool gateway service", () => {
     }
   });
 
+  it("does not classify a plugin error field as an MCP tool error", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const gateway = createTestToolGatewayService(db, {
+      pluginToolDispatcher: {
+        ...fakePluginDispatcher(),
+        listToolsForAgent: () => [{
+          name: "fixture:read_status", displayName: "Read status", description: "Read domain status.",
+          parametersSchema: { type: "object" }, pluginId: "fixture-plugin",
+        }],
+        executeTool: async () => ({
+          pluginId: "fixture-plugin", toolName: "read_status",
+          result: { content: "Domain state", error: "Ordinary plugin payload", data: { isError: true } },
+        }),
+      },
+    });
+    await db.insert(toolPolicies).values({
+      companyId: company.id, name: "Allow plugin read", policyType: "allow",
+      selectors: { toolName: "fixture:read_status" },
+    });
+    const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+    await gateway.executeTool({ sessionToken: session.token, tool: "fixture:read_status", parameters: {} });
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id));
+    expect(invocation).toMatchObject({ status: "succeeded", errorCode: null });
+  });
+
   it("blocks malicious plugin tool results before they reach the agent", async () => {
     const { company, agent, issue, run } = await createRunFixture(db);
     const [project] = await db.insert(projects).values({ companyId: company.id, name: "Plugin tool project" }).returning();

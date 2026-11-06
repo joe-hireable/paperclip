@@ -1,7 +1,7 @@
 import type { ExecutionContinuationEnvelope } from "@paperclipai/shared";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
+import { constants as fsConstants, promises as fs, readFileSync, readdirSync, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CONNECTION_INTENT_AGENT_GUIDANCE } from "@paperclipai/shared";
@@ -65,6 +65,7 @@ export interface RunProcessResult {
   // duplex control channel died before a clean completion.
   errorCode?: string | null;
   terminalResultCleanup?: TerminalResultCleanupEvidence | null;
+  ownedProcessGroupCleanup?: { status: "gone"; forceKilled: boolean };
 }
 
 export interface TerminalResultCleanupOptions {
@@ -91,6 +92,7 @@ interface RunningProcess {
   child: ChildProcess;
   graceSec: number;
   processGroupId: number | null;
+  signalOwnedGroup?: (signal: NodeJS.Signals) => Promise<{ status: "gone"; forceKilled: boolean }>;
 }
 
 interface SpawnTarget {
@@ -122,14 +124,21 @@ function resolveProcessGroupId(child: ChildProcess) {
 
 // Exported so the direct-child fallback branch can be unit-tested directly.
 export function signalRunningProcess(
-  running: Pick<RunningProcess, "child" | "processGroupId">,
+  running: Pick<RunningProcess, "child" | "processGroupId" | "signalOwnedGroup">,
   signal: NodeJS.Signals,
 ) {
+<<<<<<< upstream+partial-joe
   if (
     process.platform !== "win32" &&
     running.processGroupId &&
     running.processGroupId > 0
   ) {
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  if (process.platform !== "win32" && running.processGroupId && running.processGroupId > 0) {
++++ joe:
+  if (running.signalOwnedGroup) return running.signalOwnedGroup(signal);
+>>>>>>> joe
     try {
       process.kill(-running.processGroupId, signal);
       return;
@@ -146,6 +155,50 @@ export function signalRunningProcess(
 }
 
 export const runningProcesses = new Map<string, RunningProcess>();
+
+const OWNED_GROUP_ENV = "PAPERCLIP_OWNED_PROCESS_GROUP";
+
+function linuxProcessIdentity(pid: number) {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  return { state: fields[0], group: Number(fields[2]), session: Number(fields[3]), start: fields[19] };
+}
+
+// This is original-owner, same-session attribution, not kernel containment or
+// a PID-reuse guarantee. A scrubbed environment or unreadable member fails closed.
+function inspectOwnedLinuxGroup(group: number, marker: string, leaderStart: string | undefined) {
+  if (!leaderStart) throw new Error("original process identity unavailable");
+  try { process.kill(-group, 0); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+  let alive = false;
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const pid = Number(entry);
+      const before = linuxProcessIdentity(pid);
+      if (before.group !== group || before.state === "Z" || before.state === "X") continue;
+      const env = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+      const after = linuxProcessIdentity(pid);
+      if (after.state === "Z" || after.state === "X") continue;
+      if (before.start !== after.start || after.group !== group || after.session !== group
+        || !after.start || BigInt(after.start) < BigInt(leaderStart)
+        || (pid === group && after.start !== leaderStart)
+        || !env.includes(`${OWNED_GROUP_ENV}=${marker}`)) {
+        throw new Error("process-group member ownership cannot be verified");
+      }
+      alive = true;
+    } catch (error) {
+      // A listed process may disappear before either /proc read completes.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ESRCH") continue;
+      throw error;
+    }
+  }
+  return alive;
+}
+
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 export const MAX_EXCERPT_BYTES = 32 * 1024;
 const TERMINAL_RESULT_SCAN_OVERLAP_CHARS = 64 * 1024;
@@ -4727,14 +4780,27 @@ export async function runChildProcess(
       startedAt: string;
     }) => Promise<void>;
     terminalResultCleanup?: TerminalResultCleanupOptions;
+    cleanupOwnedProcessGroup?: boolean;
     stdin?: string;
     remoteExecution?: RemoteExecutionSpec | null;
     localProcessSandbox?: LocalProcessSandboxOptions | null;
   },
 ): Promise<RunProcessResult> {
+<<<<<<< upstream+partial-joe
   const onLogError =
     opts.onLogError ??
     ((err, id, msg) => console.warn({ err, runId: id }, msg));
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
++++ joe:
+  if (opts.cleanupOwnedProcessGroup && (process.platform !== "linux" || opts.remoteExecution
+    || opts.localProcessSandbox || opts.terminalResultCleanup || !opts.onSpawn
+    || !Number.isFinite(opts.timeoutSec) || opts.timeoutSec <= 0
+    || !Number.isFinite(opts.graceSec) || opts.graceSec < 0)) {
+    throw new Error("owned process-group cleanup requires bounded Linux local execution and onSpawn");
+  }
+>>>>>>> joe
   return new Promise<RunProcessResult>((resolve, reject) => {
     const rawMerged: NodeJS.ProcessEnv = {
       ...sanitizeInheritedPaperclipEnv(process.env),
@@ -4767,6 +4833,8 @@ export async function runChildProcess(
     })
       .then((target) => {
         const childEnv = { ...mergedEnv, ...target.env };
+        const ownedMarker = opts.cleanupOwnedProcessGroup ? randomUUID() : null;
+        if (ownedMarker) childEnv[OWNED_GROUP_ENV] = ownedMarker;
         for (const [key, value] of Object.entries(childEnv)) {
           if (value === undefined) delete childEnv[key];
         }
@@ -4778,10 +4846,20 @@ export async function runChildProcess(
           stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
+        const ownedDeadline = performance.now() + opts.timeoutSec * 1000;
         const processGroupId = resolveProcessGroupId(child);
+        let ownedLeaderStart: string | undefined;
+        if (ownedMarker && processGroupId) {
+          try {
+            const identity = linuxProcessIdentity(processGroupId);
+            if (identity.group === processGroupId && identity.session === processGroupId) ownedLeaderStart = identity.start;
+          } catch { /* Missing identity must retain the lease, never authorise a signal. */ }
+        }
 
+        let spawnPersistFailed = false;
         const spawnPersistPromise =
           typeof child.pid === "number" && child.pid > 0 && opts.onSpawn
+<<<<<<< upstream+partial-joe
             ? opts
                 .onSpawn({ pid: child.pid, processGroupId, startedAt })
                 .catch((err) => {
@@ -4791,13 +4869,32 @@ export async function runChildProcess(
                     "failed to record child process metadata",
                   );
                 })
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+            ? opts.onSpawn({ pid: child.pid, processGroupId, startedAt }).catch((err) => {
+              onLogError(err, runId, "failed to record child process metadata");
+            })
++++ joe:
+            ? (ownedMarker
+              ? Promise.resolve().then(() => opts.onSpawn!({ pid: child.pid!, processGroupId, startedAt }))
+              : opts.onSpawn({ pid: child.pid, processGroupId, startedAt })).catch((err) => {
+              spawnPersistFailed = true;
+>>>>>>> joe
             : Promise.resolve();
 
+<<<<<<< upstream+partial-joe
         runningProcesses.set(runId, {
           child,
           graceSec: opts.graceSec,
           processGroupId,
         });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+        runningProcesses.set(runId, { child, graceSec: opts.graceSec, processGroupId });
++++ joe:
+        const running: RunningProcess = { child, graceSec: opts.graceSec, processGroupId };
+        runningProcesses.set(runId, running);
+>>>>>>> joe
 
         let timedOut = false;
         let stdout = "";
@@ -4811,6 +4908,59 @@ export async function runChildProcess(
         let terminalCleanupKillTimer: NodeJS.Timeout | null = null;
         let terminalResultStdoutScanOffset = 0;
         let terminalResultStderrScanOffset = 0;
+        let ownedCleanup: Promise<{ status: "gone"; forceKilled: boolean }> | undefined;
+        let ownedForceKill = false;
+
+        const drainOwnedGroup = () => {
+          if (ownedCleanup) return ownedCleanup;
+          ownedCleanup = (async () => {
+            let forceKilled = false;
+            const graceMs = Math.max(1, opts.graceSec) * 1000;
+            const escalationAt = performance.now() + graceMs;
+            const stopAt = escalationAt + 1000;
+            let termSent = false;
+            for (;;) {
+              if (!processGroupId || !ownedMarker) throw new Error("original process group unavailable");
+              if (!inspectOwnedLinuxGroup(processGroupId, ownedMarker, ownedLeaderStart)) {
+                let persistTimer: NodeJS.Timeout | undefined;
+                try {
+                  await Promise.race([spawnPersistPromise, new Promise<never>((_, fail) => {
+                    persistTimer = setTimeout(() => fail(new Error("child process metadata persistence deadline exceeded")),
+                      Math.max(0, ownedDeadline - performance.now()));
+                  })]);
+                } finally { if (persistTimer) clearTimeout(persistTimer); }
+                if (spawnPersistFailed) throw new Error("child process metadata was not persisted");
+                return { status: "gone" as const, forceKilled };
+              }
+              if (performance.now() >= stopAt) throw new Error("process group survived cleanup deadline");
+              const force = ownedForceKill || performance.now() >= escalationAt;
+              if (!termSent || (force && !forceKilled)) {
+                try { process.kill(-processGroupId, force ? "SIGKILL" : "SIGTERM"); } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+                }
+                termSent = true;
+                forceKilled ||= force;
+              }
+              await new Promise((done) => setTimeout(done, 25));
+            }
+          })().catch((cause: unknown) => {
+            if (timeout) clearTimeout(timeout);
+            // Keep the registry and persisted ownership evidence for normal
+            // reconciliation. No unverified fallback signal or lease release.
+            const error = Object.assign(new Error("owned process-group cleanup incomplete", { cause }), {
+              code: "owned_process_group_cleanup_incomplete",
+            });
+            reject(error);
+            throw error;
+          });
+          // Exit and deadline callbacks start the same promise without awaiting it.
+          void ownedCleanup.catch(() => {});
+          return ownedCleanup;
+        };
+        if (ownedMarker) running.signalOwnedGroup = (signal) => {
+          if (signal === "SIGKILL") ownedForceKill = true;
+          return drainOwnedGroup();
+        };
 
         const clearTerminalCleanupTimers = () => {
           if (terminalCleanupTimer) clearTimeout(terminalCleanupTimer);
@@ -4882,6 +5032,7 @@ export async function runChildProcess(
             ? setTimeout(() => {
                 timedOut = true;
                 clearTerminalCleanupTimers();
+                if (ownedMarker) { void drainOwnedGroup(); return; }
                 signalRunningProcess({ child, processGroupId }, "SIGTERM");
                 setTimeout(
                   () => {
@@ -4938,6 +5089,7 @@ export async function runChildProcess(
         }
 
         child.on("error", (err: Error) => {
+          if (ownedMarker && child.pid) { void drainOwnedGroup(); return; }
           if (timeout) clearTimeout(timeout);
           clearTerminalCleanupTimers();
           runningProcesses.delete(runId);
@@ -4952,9 +5104,11 @@ export async function runChildProcess(
         });
 
         child.on("exit", () => {
+          if (ownedMarker) void drainOwnedGroup();
           maybeArmTerminalResultCleanup();
         });
 
+<<<<<<< upstream+partial-joe
         child.on(
           "close",
           (code: number | null, signal: NodeJS.Signals | null) => {
@@ -4989,6 +5143,32 @@ export async function runChildProcess(
             });
           },
         );
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+                stderr,
+                pid: child.pid ?? null,
+                startedAt,
+                terminalResultCleanup: terminalCleanupStarted
+                  ? {
+                    kind: "terminal_result_cleanup",
++++ joe:
+                ...(ownedProcessGroupCleanup ? { ownedProcessGroupCleanup } : {}),
+--- base ctx:
+        child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+          if (timeout) clearTimeout(timeout);
+          clearTerminalCleanupTimers();
+          runningProcesses.delete(runId);
++++ joe:
+        child.on("close", async (code: number | null, signal: NodeJS.Signals | null) => {
+          let ownedProcessGroupCleanup: RunProcessResult["ownedProcessGroupCleanup"];
+          if (ownedMarker && child.pid) {
+            try {
+              ownedProcessGroupCleanup = await drainOwnedGroup();
+            } catch {
+              return;
+            }
+          }
+>>>>>>> joe
       })
       .catch(reject);
   });

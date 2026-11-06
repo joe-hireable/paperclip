@@ -18,6 +18,10 @@ export const queryKeys = {
     detail: (companyId: string | null, userId: string | null, agentId: string | undefined) =>
       ["agent-chat", companyId, userId, agentId] as const,
   },
+  executionBindings: {
+    list: (companyId: string) => ["execution-bindings", companyId] as const,
+    forRun: (companyId: string, runId: string) => ["execution-bindings", companyId, "run", runId] as const,
+  },
   companies: {
     /**
      * Prefix for everything company-shaped. Matches the list, details and stats
@@ -519,6 +523,8 @@ export const queryKeys = {
         companyId,
         { includeArchived: opts.includeArchived === true },
       ] as const,
+    conversation: (companyId: string, projectId: string) =>
+      ["projects", companyId, projectId, "conversation"] as const,
     detail: (id: string) => ["projects", "detail", id] as const,
     accessMembers: (id: string) => ["projects", "access-members", id] as const,
   },

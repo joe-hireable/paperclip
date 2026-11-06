@@ -3,6 +3,9 @@ import type { Issue } from "@paperclipai/shared";
 type IssuePropertiesPanelKeyIssue = Pick<
   Issue,
   | "id"
+  | "title"
+  | "description"
+  | "assigneeAdapterOverrides"
   | "status"
   | "displayStatus"
   | "priority"
@@ -36,6 +39,9 @@ export function buildIssuePropertiesPanelKey(
 
   return JSON.stringify({
     id: issue.id,
+    title: issue.title,
+    description: issue.description,
+    assigneeAdapterOverrides: issue.assigneeAdapterOverrides,
     status: issue.status,
     displayStatus: issue.displayStatus,
     priority: issue.priority,

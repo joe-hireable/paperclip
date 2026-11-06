@@ -1,3 +1,6 @@
+import { executionDataClassSchema } from "../execution-bindings.js";
+import { intelligentExecutionProfileSchema, intelligentRoutingCandidateInputSchema, intelligentRoutingRequirementsSchema } from "../intelligent-routing.js";
+import { agentDesiredSkillEntrySchema } from "./adapter-skills.js";
 import { z } from "zod";
 import { PROJECT_STATUSES, PROJECT_ICON_NAMES } from "../constants.js";
 import { envConfigSchema } from "./secret.js";
@@ -107,6 +110,9 @@ export const updateProjectWorkspaceSchema = z.object({
 export type UpdateProjectWorkspace = z.infer<typeof updateProjectWorkspaceSchema>;
 
 const projectFields = {
+  // Policy writes require the dedicated board/CAS endpoint, including explicit null.
+  coordinationPolicy: z.never().optional(),
+  coordinationPolicyRevision: z.never().optional(),
   /** @deprecated Use goalIds instead */
   goalId: z.string().guid().optional().nullable(),
   goalIds: z.array(z.string().guid()).optional(),
@@ -147,3 +153,62 @@ export const addProjectAccessMemberSchema = z.object({
 export type AddProjectAccessMember = z.infer<typeof addProjectAccessMemberSchema>;
 
 export type ProjectExecutionWorkspacePolicy = z.infer<typeof projectExecutionWorkspacePolicySchema>;
+
+export const ensureProjectConversationSchema = z.object({
+  adoptIssueId: z.string().uuid().optional(),
+}).strict();
+
+
+// Pins describe approved intent only. They cannot qualify dynamic skill delivery.
+const coordinatorSkillPinsSchema = z.array(agentDesiredSkillEntrySchema.extend({ versionId: z.string().uuid() }).strict()).min(1).max(32);
+const coordinatorRoutingSchema = z.object({
+  requirements: intelligentRoutingRequirementsSchema,
+  candidates: z.array(intelligentRoutingCandidateInputSchema).min(1).max(32),
+}).strict();
+export const projectCoordinationPolicySchema = z.object({
+  version: z.literal(1),
+  enabled: z.boolean(),
+  dataClass: executionDataClassSchema,
+  profiles: z.array(intelligentExecutionProfileSchema).min(1).max(32),
+  skills: coordinatorSkillPinsSchema,
+  maxConcurrentAttempts: z.number().int().min(1).max(32),
+  maxTurnsPerAttempt: z.number().int().min(1).max(100),
+  // Board-owned evidence is reused unchanged; automatic progression never renews it.
+  automaticExecution: z.object({
+    projectWorkspaceId: z.string().uuid(),
+    centralCompanyId: z.string().uuid(),
+    centralPolicyDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    coordinator: coordinatorRoutingSchema,
+    specialist: coordinatorRoutingSchema.optional(),
+  }).strict().optional(),
+  specialistHandoff: z.object({
+    roleKey: z.string().min(1).max(64).regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/),
+    agentId: z.string().uuid(),
+    profile: intelligentExecutionProfileSchema,
+    skills: coordinatorSkillPinsSchema,
+    projectWorkspaceId: z.string().uuid(),
+    maxTurns: z.number().int().min(1).max(100),
+  }).strict().optional(),
+}).strict().superRefine((policy, ctx) => {
+  if (policy.automaticExecution && Boolean(policy.specialistHandoff) !== Boolean(policy.automaticExecution.specialist)) {
+    ctx.addIssue({ code: "custom", message: "Automatic specialist execution requires both a handoff policy and routing evidence" });
+  }
+  if (JSON.stringify(policy).length > 1_048_576) {
+    ctx.addIssue({ code: "custom", message: "Coordination policies are limited to 1 MiB" });
+  }
+  if (new Set(policy.profiles.map(p => p.bindingId)).size !== policy.profiles.length ||
+      new Set(policy.skills.map(s => s.key)).size !== policy.skills.length) {
+    ctx.addIssue({ code: "custom", message: "Duplicate route or skill pins are not allowed" });
+  }
+  if (policy.specialistHandoff && new Set(policy.specialistHandoff.skills.map(s => s.key)).size !== policy.specialistHandoff.skills.length) {
+    ctx.addIssue({ code: "custom", message: "Duplicate specialist skill pins are not allowed", path: ["specialistHandoff", "skills"] });
+  }
+});
+export type ProjectCoordinationPolicy = z.infer<typeof projectCoordinationPolicySchema>;
+export const updateProjectCoordinationPolicySchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+  leadAgentId: z.string().uuid().nullable(),
+  policy: projectCoordinationPolicySchema.nullable(),
+}).strict().refine(input => !input.policy || input.leadAgentId !== null, {
+  message: "A coordination policy requires a lead role", path: ["leadAgentId"],
+});

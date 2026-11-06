@@ -240,6 +240,19 @@ describe("runAdapterExecutionTargetShellCommand", () => {
 });
 
 describe("runAdapterExecutionTargetProcess", () => {
+  it("forwards explicit owned-group cleanup for local execution only", async () => {
+    const run = vi.spyOn(serverUtils, "runChildProcess").mockResolvedValue({
+      exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: null, startedAt: null,
+    });
+    const options = { cwd: "/tmp", env: {}, timeoutSec: 2, graceSec: 1,
+      cleanupOwnedProcessGroup: true, onSpawn: async () => {}, onLog: async () => {} };
+    await runAdapterExecutionTargetProcess("owned", null, "node", [], options);
+    expect(run).toHaveBeenCalledWith("owned", "node", [], expect.objectContaining({ cleanupOwnedProcessGroup: true }));
+    await expect(runAdapterExecutionTargetProcess("remote", {
+      kind: "remote", transport: "sandbox", remoteCwd: "/tmp",
+    }, "node", [], options)).rejects.toThrow("owned process-group cleanup requires a local target");
+    expect(run).toHaveBeenCalledTimes(1);
+  });
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();

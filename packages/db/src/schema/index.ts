@@ -278,3 +278,5 @@ export { issueThreadInteractionIdempotencyKeys } from "./issue_thread_interactio
 
 export { projectTaskExecutionPolicies, executionAdmissions, executionAdmissionProjectCharges } from "./execution_admissions.js";
 export { budgetEvaluationWork } from "./budget_evaluation_work.js";
+export { executionBindings, runExecutionBindings } from "./execution_bindings.js";
+export { intelligentRoutingContracts } from "./intelligent_routing.js";

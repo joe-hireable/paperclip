@@ -97,6 +97,12 @@ const mockAssetsApi = vi.hoisted(() => ({
 const mockInstanceSettingsApi = vi.hoisted(() => ({
   getExperimental: vi.fn(),
 }));
+const boundSelection = vi.hoisted(() => ({ bindingId: "binding-1", model: "exact-model", dataClass: "synthetic", requiredCapabilities: ["text"], reason: "Fixture review", evidenceRefs: ["fixture-spec"] }));
+vi.mock("./ExecutionBindingSelector", async () => {
+  const React = await import("react");
+  return { ExecutionBindingSelector: ({ onSelect, disabled }: { onSelect: (value: unknown) => void; disabled: boolean }) => React.createElement("button", { type: "button", disabled, onClick: () => onSelect(boundSelection) }, "Qualify fixture execution") };
+});
+
 const mockMissingUserSecretsBannerRender = vi.hoisted(() => vi.fn());
 
 vi.mock("../context/DialogContext", () => ({
@@ -965,6 +971,21 @@ describe("NewIssueDialog", () => {
     });
     expect(container.textContent).not.toContain("Codex options");
 
+    act(() => root.unmount());
+  });
+
+  it("persists a qualified bound task in backlog without legacy model overrides", async () => {
+    dialogState.newIssueDefaults = { title: "Bound fixture", assigneeAgentId: "agent-1", projectId: "project-1", projectWorkspaceId: "workspace-1" };
+    mockAgentsApi.list.mockResolvedValue([{ id: "agent-1", name: "Reviewer", status: "paused", adapterType: "codex_local", adapterConfig: { model: "legacy-model" }, runtimeConfig: { executionBindingRequired: true }, permissions: {} }]);
+    mockProjectsApi.list.mockResolvedValue([{ id: "project-1", name: "Fixture", primaryWorkspaceId: "workspace-1", workspaces: [{ id: "workspace-1", projectId: "project-1", name: "Local", cwd: "/tmp/public-fixture", isPrimary: true }] }]);
+    const { root } = renderDialog(container);
+    await waitForAssertion(() => expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Qualify fixture execution")?.disabled).toBe(false));
+    const qualify = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Qualify fixture execution")!;
+    await act(async () => qualify.click());
+    expect(container.textContent).not.toContain("Model lane");
+    await act(async () => Array.from(container.querySelectorAll("button")).find(button => button.textContent?.includes("Create Task"))!.click());
+    await flush();
+    expect(mockIssuesApi.create).toHaveBeenCalledWith("company-1", expect.objectContaining({ status: "backlog", projectWorkspaceId: "workspace-1", assigneeAdapterOverrides: { executionBinding: boundSelection, useProjectWorkspace: true } }));
     act(() => root.unmount());
   });
 

@@ -178,6 +178,11 @@ async function resolveInteractionOnce(
   }
 }
 
+export type CoordinatorIntakeComment = IssueComment & {
+  coordinatorIntake: Issue;
+  intakeRequestId: string;
+};
+
 export type IssueUpdateResponse = Issue & {
   comment?: IssueComment | null;
   changes: IssueChanges;
@@ -695,6 +700,8 @@ export const issuesApi = {
       allowSharing?: boolean;
     },
   ) => api.post<FeedbackVote>(`/issues/${id}/feedback-votes`, data),
+  addCoordinatorIntake: (id: string, input: { body: string; requestId: string }) =>
+    api.post<CoordinatorIntakeComment>(`/issues/${id}/comments`, { body: input.body, intakeRequestId: input.requestId }),
   addComment: (
     id: string,
     body: string,

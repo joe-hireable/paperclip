@@ -38,6 +38,8 @@ import { IssueCreatedFromNote } from "@/components/task-detail/IssueCreatedFromN
 import { EmailThreadProvider } from "../components/EmailMessageCard";
 import { EmailTaskActivity } from "../components/EmailTaskActivity";
 import { TaskChatScrollNavigation, taskChatScrollEntry } from "@/components/task-chat/scroll-navigation";
+import { useMasterIntake } from "../lib/use-master-intake";
+import { bindingInvalidationPatch, requalifyTaskBinding, requiresTaskBinding } from "../lib/execution-binding-task";
 import {
   lazy,
   memo,
@@ -1277,6 +1279,7 @@ type IssueDetailChatTabProps = {
     string,
     import("../lib/company-members").CompanyUserProfile
   > | null;
+  masterIntake?: boolean;
   draftKey: string;
   reassignOptions: Array<{ id: string; label: string; searchText?: string }>;
   currentAssigneeValue: string;
@@ -1422,6 +1425,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   currentUserId,
   userLabelMap,
   userProfileMap,
+  masterIntake = false,
   draftKey,
   reassignOptions,
   currentAssigneeValue,
@@ -2597,6 +2601,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       interactions.length === 0 ? (
         <IssueChatSkeleton />
       ) : (
+<<<<<<< upstream+partial-joe
         <TaskChatScrollNavigation.Provider
           value={{
             ...taskChatScrollEntry(scrollLocation),
@@ -2806,6 +2811,19 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
           />
           </EmailThreadProvider>
         </TaskChatScrollNavigation.Provider>
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+          userLabelMap={userLabelMap}
+          userProfileMap={userProfileMap}
+          draftKey={draftKey}
+          enableReassign
+          reassignOptions={reassignOptions}
+          currentAssigneeValue={currentAssigneeValue}
+          suggestedAssigneeValue={suggestedAssigneeValue}
++++ joe:
+          masterIntake={masterIntake}
+          enableReassign={!masterIntake}
+>>>>>>> joe
       )}
     </div>
   );
@@ -4536,8 +4554,46 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     },
   });
 
+<<<<<<< upstream+partial-joe
   const updateIssueMutation = useUpdateIssueMutation({
     companyId: selectedCompanyId,
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  const updateIssue = useMutation({
+    mutationFn: (data: Record<string, unknown>) =>
+      issuesApi.update(issueId!, data),
+    onMutate: async (data) => {
+      await queryClient.cancelQueries({
+        queryKey: queryKeys.issues.detail(issueId!),
++++ joe:
+    scope: { id: `issue-update:${issueId}` },
+    mutationFn: async (data: Record<string, unknown>) => {
+      if ((data.status === "todo" || data.status === "in_progress") && invalidExecutionDrafts.current.has(issueId!)) {
+        throw new Error("Qualify and save the draft execution requirements before starting this task.");
+      }
+      const current = await issuesApi.get(issueId!);
+      const patch = bindingInvalidationPatch(current, data);
+      const next = { ...current, ...patch } as Issue;
+      if (current.assigneeAdapterOverrides?.executionBinding && hasLiveRuns && (patch.assigneeAdapterOverrides !== undefined || ["assigneeAgentId", "projectId", "projectWorkspaceId", "title", "description"].some(key => Object.hasOwn(patch, key)))) {
+        throw new Error("Finish or cancel the active bound run before changing its inputs or execution.");
+      }
+      if (Object.hasOwn(patch, "assigneeAgentId") && next.assigneeAgentId && !next.assigneeAdapterOverrides?.executionBinding) {
+        const role = await agentsApi.get(next.assigneeAgentId, current.companyId);
+        if (requiresTaskBinding(role)) patch.status = "backlog";
+      }
+      if (patch.status === "todo" || patch.status === "in_progress") {
+        const role = next.assigneeAgentId ? await agentsApi.get(next.assigneeAgentId, current.companyId) : null;
+        await requalifyTaskBinding(next, role);
+      }
+      return issuesApi.update(issueId!, patch);
+    },
+--- base ctx:
+  const updateIssue = useMutation({
+    mutationFn: (data: Record<string, unknown>) =>
+      issuesApi.update(issueId!, data),
++++ joe:
+  const invalidExecutionDrafts = useRef(new Set<string>());
+>>>>>>> joe
     onSuccess: ({
       comment: _comment,
       changes: _changes,
@@ -4834,9 +4890,18 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   });
   const handleIssuePropertiesUpdate = useCallback(
     (data: Record<string, unknown>) => {
+      // Qualification clear/save must finish in order before another preview can succeed.
+      if ("assigneeAdapterOverrides" in data && data.status === "backlog") {
+        const taskId = issueId!;
+        invalidExecutionDrafts.current.add(taskId);
+        return updateIssue.mutateAsync(data).then(result => {
+          if (data.assigneeAdapterOverrides) invalidExecutionDrafts.current.delete(taskId);
+          return result;
+        });
+      }
       updateIssue.mutate(data);
     },
-    [updateIssue.mutate],
+    [issueId, updateIssue.mutate, updateIssue.mutateAsync],
   );
 
   const updateChildIssue = useMutation({
@@ -5014,6 +5079,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     },
   });
 
+<<<<<<< upstream+partial-joe
   const addComment = useAccountBoundMutation({
     mutationFn: async ({ body, reopen, interrupt, attachmentIds, clientRequestId, runSettings }: {
       body: string; reopen?: boolean; interrupt?: boolean; attachmentIds?: string[]; clientRequestId?: string; runSettings?: ComposerRunSettings;
@@ -5040,6 +5106,18 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       }
       return issuesApi.addComment(writableIssueId, body, reopen, interrupt, attachmentIds, clientRequestId ?? crypto.randomUUID());
     },
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  const addComment = useMutation({
+    mutationFn: ({
+      body,
++++ joe:
+  const isProjectMaster = issue?.originKind === "project_master_chat";
+  const masterIntake = useMasterIntake(isProjectMaster && issue && currentUserId
+    ? { companyId: issue.companyId, masterIssueId: issue.id, authorUserId: currentUserId }
+    : null);
+
+>>>>>>> joe
     onMutate: async ({ body, reopen, interrupt }) => {
       // Start cache cancellation immediately but do not put it in front of the
       // optimistic echo. The new-runner startup placeholder must paint in the
@@ -5802,8 +5880,16 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     },
   });
 
+  async function invalidateBindingForFileChange() {
+    const current = await issuesApi.get(issueId!);
+    if (current.assigneeAdapterOverrides?.executionBinding) {
+      await updateIssue.mutateAsync({ assigneeAdapterOverrides: null, status: "backlog" });
+    }
+  }
+
   const uploadAttachment = useMutation({
     mutationFn: async (file: File) => {
+<<<<<<< upstream+partial-joe
       if (conversation) {
         return issuesApi.uploadAttachment(conversation.agent.companyId, await resolveWritableIssueId(), file);
       }
@@ -5814,6 +5900,13 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         loadedIssue.id,
         file,
       );
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      if (!selectedCompanyId) throw new Error("No organization selected");
+      return issuesApi.uploadAttachment(selectedCompanyId, issueId!, file);
++++ joe:
+      await invalidateBindingForFileChange();
+>>>>>>> joe
     },
     onSuccess: (result) => {
       setAttachmentError(null);
@@ -5837,7 +5930,14 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       const body = await file.text();
       const inferredTitle = titleizeFilename(baseName);
       const nextTitle = existing?.title ?? inferredTitle ?? null;
+<<<<<<< upstream+partial-joe
       return issuesApi.upsertDocument(await resolveWritableIssueId(), key, {
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      return issuesApi.upsertDocument(issueId!, key, {
++++ joe:
+      await invalidateBindingForFileChange();
+>>>>>>> joe
         title: key === "plan" ? null : nextTitle,
         format: "markdown",
         body,
@@ -5860,8 +5960,10 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   });
 
   const deleteAttachment = useMutation({
-    mutationFn: (attachmentId: string) =>
-      issuesApi.deleteAttachment(attachmentId),
+    mutationFn: async (attachmentId: string) => {
+      await invalidateBindingForFileChange();
+      return issuesApi.deleteAttachment(attachmentId);
+    },
     onSuccess: () => {
       setAttachmentError(null);
       queryClient.invalidateQueries({
@@ -6880,6 +6982,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       clientRequestId?: string,
       runSettings?: ComposerRunSettings,
     ) => {
+<<<<<<< upstream+partial-joe
       if (!issue?.conversationAgentId && (reassignment || runSettings)) {
         await addCommentAndReassign.mutateAsync({
           body,
@@ -6889,11 +6992,28 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           clientRequestId,
           runSettings,
         });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      if (reassignment) {
+        await addCommentAndReassign.mutateAsync({ body, reopen, reassignment });
++++ joe:
+      if (isProjectMaster) {
+        await masterIntake.send(body);
+        return;
+      }
+>>>>>>> joe
         return;
       }
       await addComment.mutateAsync({ body, reopen, attachmentIds, clientRequestId, runSettings });
     },
+<<<<<<< upstream+partial-joe
     [addComment, addCommentAndReassign, issue?.conversationAgentId],
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+    [addComment, addCommentAndReassign],
++++ joe:
+    [addComment, addCommentAndReassign, isProjectMaster, masterIntake],
+>>>>>>> joe
   );
   const handleCommentImageUpload = useCallback(
     async (file: File) => {
@@ -7025,6 +7145,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   const resumeAssigneeAgent = useMutation({
     mutationFn: async () => {
       if (!issueAssigneeAgentIdForResume) throw new Error("No assignee agent");
+      const role = await agentsApi.get(issueAssigneeAgentIdForResume, issueCompanyIdForResume ?? undefined);
+      if (requiresTaskBinding(role)) throw new Error("This role requires qualified task execution. Resume the role explicitly from its controls, then start the reviewed task from backlog.");
       await agentsApi.resume(
         issueAssigneeAgentIdForResume,
         issueCompanyIdForResume ?? undefined,
@@ -8300,6 +8422,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
             />
           )}
 
+<<<<<<< upstream+partial-joe
           {taskChatShellEnabled ? null : (
             <IssueOutputSection
               workProducts={workProducts}
@@ -8317,6 +8440,80 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
               }}
             />
           )}
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+                    : undefined
+                }
+                runFinalizationActions={runFinalizationActions}
+                onWorkModeChange={(nextMode) => {
+                  const currentMode: IssueWorkMode =
+                    issue.workMode ?? "standard";
+                  if (currentMode === nextMode) return;
++++ joe:
+                onWorkModeChange={isProjectMaster ? undefined : (nextMode) => {
+--- base ctx:
+                currentAssigneeValue={actualAssigneeValue}
+                suggestedAssigneeValue={suggestedAssigneeValue}
+                mentions={mentionOptions}
+                composerDisabledReason={null}
+                composerHint={composerHint}
+                queuedCommentReason={queuedCommentReason}
+                onVote={handleCommentVote}
++++ joe:
+                composerDisabledReason={isProjectMaster ? (!currentUserId ? "Sign in to save a project message." : masterIntake.pending ? "Resolve the pending message before sending another one." : null) : null}
+--- base ctx:
+                currentUserId={currentUserId}
+                userLabelMap={userLabelMap}
+                userProfileMap={userProfileMap}
+                draftKey={`paperclip:issue-comment-draft:${issue.id}`}
+                reassignOptions={commentReassignOptions}
+                currentAssigneeValue={actualAssigneeValue}
+                suggestedAssigneeValue={suggestedAssigneeValue}
++++ joe:
+                draftKey={isProjectMaster ? `paperclip:master-draft:${JSON.stringify([currentUserId, issue.companyId, issue.id])}` : `paperclip:issue-comment-draft:${issue.id}`}
+--- base ctx:
+                onRefreshLatestComments={refetchLatestComments}
+                composerRef={commentComposerRef}
+                composerAccessory={
+                  hasVisibleMonitorSurface(issue) ? (
+                    <IssueMonitorComposerStrip
+                      issue={issue}
+                      onCheckNow={() => checkIssueMonitorNow.mutate()}
++++ joe:
+                  isProjectMaster ? (
+                    <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3 text-sm" data-testid="master-intake-notice">
+                      <p>Messages are saved here. Agent coordination is still being set up.</p>
+                      {masterIntake.error ? <p role="alert">{masterIntake.error}</p> : null}
+                      {masterIntake.pending ? <>
+                        <p>{masterIntake.busy ? "Saving or checking this message…" : "Saving has not been confirmed. This original message is kept for recovery."}</p>
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap font-sans">{masterIntake.pending.body}</pre>
+                        <Button size="sm" variant="outline" disabled={masterIntake.busy} onClick={() => void masterIntake.retry()}>Retry saving this message</Button>
+                        <Button size="sm" variant="ghost" disabled={masterIntake.busy} onClick={() => void masterIntake.checkSaved()}>Check saved receipt</Button>
+                      </> : null}
+                      {masterIntake.receipt ? <p>Message saved. <Link to={createIssueDetailPath(masterIntake.receipt.identifier ?? masterIntake.receipt.id)}>Intake {masterIntake.receipt.identifier ?? masterIntake.receipt.id}</Link> is {masterIntake.receipt.status === "cancelled" ? "cancelled" : "blocked while agent coordination is being set up"}.</p> : null}
+                    </div>
+                  ) : hasVisibleMonitorSurface(issue) ? (
+--- base ctx:
+                companyId={issue.companyId}
+                projectId={issue.projectId ?? null}
+                issueStatus={issue.status}
+                issueAssigneeAgentId={issue.assigneeAgentId}
+                issueWorkMode={issue.workMode ?? "standard"}
+                executionRunId={issue.executionRunId ?? null}
+                blockedBy={issue.blockedBy ?? []}
++++ joe:
+                issueAssigneeAgentId={isProjectMaster ? null : issue.assigneeAgentId}
+--- base ctx:
+          >
+            {resolvedDetailTab === "chat" ? (
+              <IssueDetailChatTab
+                threadHeader={taskChatThreadHeader}
+                issueBrief={
+                  // Suppress the seeded-description bubble for the onboarding first
++++ joe:
+                key={isProjectMaster ? JSON.stringify([currentUserId, issue.companyId, issue.id]) : undefined}
+                masterIntake={isProjectMaster}
+>>>>>>> joe
 
           {taskChatShellEnabled ? null : attachmentsInitialLoading ? (
             <IssueSectionSkeleton titleWidth="w-24" rows={2} />
@@ -8548,6 +8745,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                         }
                       : undefined
                   }
+<<<<<<< upstream+partial-joe
                   issueId={conversation && !conversation.issue ? "" : issue.id}
                   companyId={issue.companyId}
                   projectId={issue.projectId ?? null}
@@ -8702,6 +8900,16 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                               scope: treeControlScope,
                             })
                             .then(() => undefined)
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+                  onAddSubIssue={openNewSubIssue}
+                  onUpdate={(data) => updateIssue.mutate(data)}
+                  inline
+                  hasActiveRun={resolvedHasActiveRun}
+                  externalObjects={
++++ joe:
+                  onUpdate={handleIssuePropertiesUpdate}
+>>>>>>> joe
                       : undefined
                   }
                   runFinalizationActions={runFinalizationActions}
@@ -8791,6 +8999,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                       : undefined
                   }
                 />
+<<<<<<< upstream+partial-joe
               ) : null}
             </TabsContent>
 
@@ -8837,6 +9046,18 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   missingBehavior="placeholder"
                 />
               </TabsContent>
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+                          : undefined
+                      }
+                      onAddSubIssue={openNewSubIssue}
+                      onUpdate={(data) => updateIssue.mutate(data)}
+                      inline
+                      hasActiveRun={resolvedHasActiveRun}
+                      externalObjects={
++++ joe:
+                      onUpdate={handleIssuePropertiesUpdate}
+>>>>>>> joe
             )}
           </Tabs>
 

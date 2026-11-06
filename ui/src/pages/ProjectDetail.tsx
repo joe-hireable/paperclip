@@ -31,7 +31,7 @@ import { MembershipAction } from "../components/MembershipAction";
 import { StarToggle } from "../components/StarToggle";
 import { buildProjectWorkspaceSummaries } from "../lib/project-workspaces-tab";
 import { collectLiveIssueIds } from "../lib/liveIssueIds";
-import { projectRouteRef } from "../lib/utils";
+import { issueUrl, projectRouteRef } from "../lib/utils";
 import { PROJECT_ICONS } from "../lib/project-icons";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 import { Button } from "@/components/ui/button";
@@ -322,6 +322,68 @@ function ProjectPluginOperationsList({
       viewStateKey={`paperclip:project-plugin-operations-view:${pluginKey}`}
       onUpdateIssue={(id, data) => updateIssue.mutate({ id, data })}
     />
+  );
+}
+
+function ProjectConversationEntry({ companyId, projectId, archived }: {
+  companyId: string;
+  projectId: string;
+  archived: boolean;
+}) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const conversation = useQuery({
+    queryKey: queryKeys.projects.conversation(companyId, projectId),
+    queryFn: () => projectsApi.getConversation(projectId, companyId),
+  });
+  const createConversation = useMutation({
+    mutationFn: () => projectsApi.createConversation(projectId, companyId),
+    onSuccess: (result) => {
+      queryClient.setQueryData(queryKeys.projects.conversation(result.companyId, result.projectId), result);
+    },
+  });
+
+  return (
+    <section aria-label="Project conversation" className="rounded-lg border border-border p-4 space-y-2">
+      <h3 className="text-sm font-medium">Project conversation</h3>
+      <p className="text-sm text-muted-foreground">
+        {conversation.data?.automaticExecutionConfigured
+          ? "Paperclip checks each request, coordinates the available agents and returns their results here."
+          : "Messages are saved here. Agent coordination is still being set up."}
+      </p>
+      {conversation.isPending ? (
+        <p role="status" className="text-sm text-muted-foreground">Loading project conversation...</p>
+      ) : conversation.isError ? (
+        <div className="space-y-2">
+          <p role="alert" className="text-sm text-destructive">Could not load the project conversation.</p>
+          <Button variant="outline" size="sm" onClick={() => void conversation.refetch()}>Retry</Button>
+        </div>
+      ) : conversation.data.masterIssue ? (
+        <Button variant="outline" size="sm" asChild>
+          <Link to={issueUrl(conversation.data.masterIssue)}>Open project conversation</Link>
+        </Button>
+      ) : archived || conversation.data.readinessReason === "project_archived" ? (
+        <p className="text-sm text-muted-foreground">Archived projects cannot start a conversation.</p>
+      ) : (
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={createConversation.isPending}
+          onClick={() => createConversation.mutate(undefined, {
+            // Per-call callbacks stop on unmount; the keyed entry prevents a late
+            // response from navigating after a project or company switch.
+            onSuccess: (result) => {
+              if (result.masterIssue) navigate(issueUrl(result.masterIssue));
+            },
+          })}
+        >
+          {createConversation.isPending ? "Creating conversation..." : "Create project conversation"}
+        </Button>
+      )}
+      {createConversation.isError && (
+        <p role="alert" className="text-sm text-destructive">Could not create the project conversation.</p>
+      )}
+    </section>
   );
 }
 
@@ -821,6 +883,13 @@ export function ProjectDetail() {
           />
         </div>
       </div>
+
+      <ProjectConversationEntry
+        key={`${project.companyId}:${project.id}`}
+        companyId={project.companyId}
+        projectId={project.id}
+        archived={Boolean(project.archivedAt)}
+      />
 
       <SummarySlotCard
         companyId={resolvedCompanyId}

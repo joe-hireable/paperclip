@@ -1,5 +1,17 @@
+<<<<<<< upstream+partial-joe
 import { notifyAttentionRetentionWork } from "./retention-work-notifications.js";
 import { type BudgetServiceHooks } from "./budgets.js";
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+import { createHash, randomBytes } from "node:crypto";
+import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
+import type { Db } from "@paperclipai/db";
+import {
+  agents,
+  agentConfigRevisions,
++++ joe:
+import { removeReleasedRunExecutionBindings } from "./execution-bindings.js";
+>>>>>>> joe
 
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -42,6 +54,20 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
 
     getById,
 
+<<<<<<< upstream+partial-joe
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+          .for("update");
+        await issueThreadInteractionService(tx as unknown as Db)
+          .cancelPendingForDeletedAddressee(existing.companyId, id);
+        await tx.update(agents).set({ reportsTo: null }).where(eq(agents.reportsTo, id));
+        await tx
+          .update(issues)
++++ joe:
+        const agentRuns = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+          .where(eq(heartbeatRuns.agentId, id)).for("update");
+        await removeReleasedRunExecutionBindings(tx as unknown as Db, existing.companyId, agentRuns.map((run) => run.id));
+>>>>>>> joe
     updatePermissions: async (id: string, permissions: Record<string, unknown> & { canCreateAgents: boolean }) => {
       const existing = await getById(id);
       if (!existing) return null;

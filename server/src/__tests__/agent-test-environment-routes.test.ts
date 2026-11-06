@@ -4,6 +4,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { AdapterEnvironmentTestContext } from "@paperclipai/adapter-utils";
 import type { ServerAdapterModule } from "../adapters/index.js";
 
+const bindingGuard = vi.hoisted(() => ({
+  isRegisteredHarness: vi.fn(async () => false),
+  listQualifiedModels: vi.fn(async () => [{ id: "qualified-model", label: "qualified-model" }]),
+}));
+vi.mock("../services/execution-bindings.js", () => ({ executionBindingService: () => bindingGuard }));
+
 const mockAgentService = vi.hoisted(() => ({
   getById: vi.fn(),
   getChainOfCommand: vi.fn(async () => []),
@@ -229,7 +235,61 @@ async function unregisterTestAdapter(type: string) {
 }
 
 describe("agent test-environment route", () => {
+<<<<<<< upstream+partial-joe
   beforeAll(async () => {
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  beforeEach(async () => {
++++ joe:
+  it("refuses a registered harness probe before credentials, despite caller-supplied binding flags", async () => {
+    const { registerServerAdapter } = await import("../adapters/index.js");
+    registerServerAdapter({ ...externalAdapter, type: "cursor" });
+    bindingGuard.isRegisteredHarness.mockResolvedValue(true);
+    try {
+      const response = await request(await createApp()).post("/api/companies/company-1/adapters/cursor/test-environment")
+        .send({ adapterConfig: { executionBindingMode: "read_only", executionBinding: { bindingId: "forged" }, env: { XDG_CONFIG_HOME: "/other-profile" } } });
+      expect(response.status).toBe(409);
+      expect(testEnvironmentSpy).not.toHaveBeenCalled();
+      expect(mockSecretService.resolveAdapterConfigForRuntime).not.toHaveBeenCalled();
+      expect(response.body).toMatchObject({ details: { code: "execution_binding_required" } });
+    } finally { await unregisterTestAdapter("cursor"); }
+  });
+  it("refuses a registration added during probe preparation and releases its environment lease", async () => {
+    const { registerServerAdapter } = await import("../adapters/index.js");
+    registerServerAdapter({ ...externalAdapter, type: "cursor" });
+    bindingGuard.isRegisteredHarness.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mockResolveEnvironmentExecutionTarget.mockResolvedValueOnce({
+      kind: "remote", transport: "sandbox", remoteCwd: "/home/user/paperclip-workspace",
+      providerKey: "fake-plugin", runner: { execute: vi.fn() },
+    });
+    try {
+      const response = await request(await createApp()).post("/api/companies/company-1/adapters/cursor/test-environment")
+        .send({ adapterConfig: {}, environmentId: "11111111-1111-4111-8111-111111111111" });
+      expect(response.status).toBe(409);
+      expect(response.body).toMatchObject({ details: { code: "execution_binding_required" } });
+      expect(testEnvironmentSpy).not.toHaveBeenCalled();
+      expect(mockReleaseRunLease).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", lease: expect.objectContaining({ id: "lease-1" }) }));
+    } finally { await unregisterTestAdapter("cursor"); }
+  });
+  it("uses the company's qualified model inventory without unleased discovery or refresh", async () => {
+    const { registerServerAdapter } = await import("../adapters/index.js");
+    const discover = vi.fn(async () => [{ id: "unleased", label: "unleased" }]);
+    const detect = vi.fn(async () => ({ model: "unleased", provider: "native", source: "default-profile" }));
+    registerServerAdapter({ ...externalAdapter, type: "cursor", listModels: discover, refreshModels: discover, detectModel: detect });
+    bindingGuard.isRegisteredHarness.mockResolvedValue(true);
+    try {
+      const app = await createApp();
+      const response = await request(app).get("/api/companies/company-1/adapters/cursor/models");
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual([{ id: "qualified-model", label: "qualified-model" }]);
+      expect(response.headers["x-paperclip-model-source"]).toBe("qualified-bindings");
+      expect(bindingGuard.listQualifiedModels).toHaveBeenCalledWith("company-1", "cursor");
+      expect((await request(app).get("/api/companies/company-1/adapters/cursor/models?refresh=true")).status).toBe(409);
+      expect((await request(app).get("/api/companies/company-1/adapters/cursor/detect-model")).body).toBeNull();
+      expect(discover).not.toHaveBeenCalled(); expect(detect).not.toHaveBeenCalled();
+    } finally { await unregisterTestAdapter("cursor"); }
+  });
+>>>>>>> joe
     vi.resetModules();
     await loadAppModules();
   });
@@ -241,6 +301,7 @@ describe("agent test-environment route", () => {
     mockEnvironmentService.findKubernetesEnvironment.mockResolvedValue(null);
     mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableManagedSandboxOnly: false });
     mockEnvironmentService.findManagedSandboxEnvironment.mockResolvedValue(null);
+    bindingGuard.isRegisteredHarness.mockResolvedValue(false);
     mockAccessService.decide.mockResolvedValue({
       allowed: true,
       reason: "allow_explicit_grant",

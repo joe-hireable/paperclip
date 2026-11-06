@@ -6,13 +6,16 @@ import {
   activityLog,
   agentApiKeys,
   agents,
+  authUsers,
   boardApiKeys,
+  companyMemberships,
   heartbeatRuns,
 } from "@paperclipai/db";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { assertCompanyAccess } from "../routes/authz.js";
+import { createAgentKeySchema } from "@paperclipai/shared";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -31,10 +34,26 @@ function createSelectChain(rowsForTable: (table: unknown) => unknown[]) {
 }
 
 function createDbState(input: {
+<<<<<<< upstream+partial-joe
   agent: { id: string; companyId: string; status?: string; lifecycleHolds?: string[] };
-  agentKey?: { id: string; agentId: string; companyId: string; keyHash: string; responsibleUserId?: string | null };
+  agentKey?: {
+    id: string;
+    agentId: string;
+    companyId: string;
+    keyHash: string;
+    responsibleUserId?: string | null;
+    scopeConfig?: unknown;
+  };
   run?: { id: string; companyId: string; agentId: string; responsibleUserId?: string | null;
     status?: string; contextSnapshot?: Record<string, unknown>; resultJson?: Record<string, unknown> };
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  agent: { id: string; companyId: string; status?: string };
+  agentKey?: { id: string; agentId: string; companyId: string; keyHash: string; responsibleUserId?: string | null };
+  run?: { id: string; companyId: string; agentId: string; responsibleUserId?: string | null };
++++ joe:
+  responsibleMembership?: { companyId: string; status: string; membershipRole: string };
+>>>>>>> joe
 }) {
   const activity: Array<Record<string, unknown>> = [];
   const agentRow = {
@@ -51,7 +70,7 @@ function createDbState(input: {
         keyHash: input.agentKey.keyHash,
         responsibleUserId: input.agentKey.responsibleUserId ?? null,
         revokedAt: null,
-        scopeConfig: null,
+        scopeConfig: input.agentKey.scopeConfig ?? null,
       }
     : null;
   const runRow = input.run
@@ -73,6 +92,8 @@ function createDbState(input: {
         if (table === agentApiKeys) return keyRow ? [keyRow] : [];
         if (table === agents) return [agentRow];
         if (table === heartbeatRuns) return runRow ? [runRow] : [];
+        if (table === authUsers && input.responsibleMembership) return [{ id: "synthetic-owner" }];
+        if (table === companyMemberships && input.responsibleMembership) return [input.responsibleMembership];
         return [];
       }),
     update: () => ({
@@ -531,7 +552,47 @@ describe("agent auth middleware", () => {
     expect(writeRes.status).toBe(401);
   });
 
-  it("populates agent-key actors from the key responsible user binding", async () => {
+  it.each([
+    "standard",
+    [],
+    {},
+    { kind: "unknown" },
+    { kind: "skill_test" },
+    { kind: "task_bridge", projectId: "invalid" },
+    { kind: "standard", extra: true },
+  ].map((scopeConfig) => ({ scopeConfig })))("rejects malformed stored key scope $scopeConfig before protected writes", async ({ scopeConfig }) => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const token = "pcp_test_invalid_scope";
+    const { db } = createDbState({
+      agent: { id: agentId, companyId },
+      agentKey: {
+        id: randomUUID(),
+        agentId,
+        companyId,
+        keyHash: hashToken(token),
+        responsibleUserId: "user-key",
+        scopeConfig,
+      },
+    });
+    let writes = 0;
+    const app = createApp(db, "local_trusted");
+    app.post("/protected-write", (_req, res) => {
+      writes += 1;
+      res.status(201).json({ ok: true });
+    });
+    const res = await request(app).post("/protected-write").set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toContain("scope");
+    expect(writes).toBe(0);
+  });
+
+  it.each([
+    null,
+    { kind: "standard" },
+    { kind: "skill_test", issueId: "11111111-1111-4111-8111-111111111111" },
+    { kind: "task_bridge", projectId: "11111111-1111-4111-8111-111111111111" },
+  ])("populates valid agent-key actors with scope %j", async (scopeConfig) => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const token = "pcp_test_agent_key";
@@ -543,6 +604,7 @@ describe("agent auth middleware", () => {
         companyId,
         keyHash: hashToken(token),
         responsibleUserId: "user-key",
+        scopeConfig,
       },
     });
 
@@ -557,6 +619,7 @@ describe("agent auth middleware", () => {
       companyId,
       onBehalfOfUserId: "user-key",
       source: "agent_key",
+      keyScope: scopeConfig ?? { kind: "standard" },
     });
   });
 
@@ -592,5 +655,91 @@ describe("agent auth middleware", () => {
       entityId: keyId,
       details: { method: "GET", url: `/companies/${companyId}/protected` },
     });
+  });
+});
+
+
+describe("approval-reader key scope", () => {
+  const companyId = "11111111-1111-4111-8111-111111111111";
+  const foreignCompanyId = "22222222-2222-4222-8222-222222222222";
+  const approvalId = "33333333-3333-4333-8333-333333333333";
+  const foreignApprovalId = "44444444-4444-4444-8444-444444444444";
+  const agentId = "55555555-5555-4555-8555-555555555555";
+  const token = "pcp_owned_synthetic_approval_reader";
+  function readerApp(scopeConfig: unknown = { kind: "approval_reader" }, jwt = false) {
+    const { db } = createDbState({
+      agent: { id: agentId, companyId },
+      ...(!jwt ? { agentKey: { id: randomUUID(), agentId, companyId, keyHash: hashToken(token), responsibleUserId: "synthetic-owner", scopeConfig } } : {}),
+      responsibleMembership: { companyId, status: "active", membershipRole: "viewer" },
+    });
+    const app = express();
+    let reached = 0;
+    app.use(actorMiddleware(db, { deploymentMode: "authenticated", resolveSession: async () => null }));
+    app.get(["/api/approvals/:id", "/api/approvals/:id/issues"], (req, res) => {
+      assertCompanyAccess(req, req.params.id === foreignApprovalId ? foreignCompanyId : companyId);
+      reached += 1;
+      res.json({ id: req.params.id, actor: req.actor.type });
+    });
+    app.use((_req, res) => { reached += 1; res.json({ otherwiseReached: true }); });
+    app.use(errorHandler);
+    return { app, reached: () => reached };
+  }
+  it("accepts only the strict persistent reader scope", () => {
+    expect(createAgentKeySchema.parse({ scope: { kind: "approval_reader" } }).scope).toEqual({ kind: "approval_reader" });
+    expect(createAgentKeySchema.safeParse({ scope: { kind: "approval_reader", canWrite: true } }).success).toBe(false);
+  });
+  it.each(["", "/issues"])("reads same-company approval endpoint %s", async (suffix) => {
+    const { app, reached } = readerApp();
+    const result = await request(app).get(`/api/approvals/${approvalId}${suffix}`).set("Authorization", `Bearer ${token}`);
+    expect(result.status).toBe(200);expect(result.body.actor).toBe("agent");expect(reached()).toBe(1);
+  });
+  it.each(["", "/issues"])("preserves company isolation for endpoint %s", async (suffix) => {
+    const { app, reached } = readerApp();
+    const result = await request(app).get(`/api/approvals/${foreignApprovalId}${suffix}`).set("Authorization", `Bearer ${token}`);
+    expect(result.status).toBe(403);expect(reached()).toBe(0);
+  });
+  it.each([
+    ["post", `/api/approvals/${approvalId}/approve`],
+    ["post", `/api/companies/${companyId}/approvals`],
+    ["post", `/api/approvals/${approvalId}/comments`],
+    ["patch", `/api/agents/${agentId}`],
+    ["delete", `/api/agents/${agentId}/keys/synthetic`],
+    ["put", `/api/plugins/synthetic/run`],
+    ["head", `/api/approvals/${approvalId}`],
+    ["options", `/api/approvals/${approvalId}`],
+    ["get", `/api/companies/${companyId}/approvals`],
+    ["get", `/api/approvals/${approvalId}/comments`],
+    ["get", `/api/approvals/${approvalId}/issues/`],
+    ["get", `/api/approvals/${approvalId}?extra=1`],
+    ["get", `/api/approvals/${approvalId}%2Fissues`],
+    ["get", "/api/approvals/not-a-uuid"],
+    ["get", "/api/agents/me"],
+    ["get", "/api/secrets"],
+    ["get", "/api/plugins/synthetic"],
+  ] as const)("denies %s %s before any router", async (method, url) => {
+    const { app, reached } = readerApp();
+    const result = await request(app)[method](url).set("Authorization", `Bearer ${token}`);
+    expect(result.status).toBe(403);expect(reached()).toBe(0);
+  });
+  it("keeps an existing standard key's route access unchanged", async () => {
+    const { app, reached } = readerApp({ kind: "standard" });
+    const result = await request(app).get("/api/agents/me").set("Authorization", `Bearer ${token}`);
+    expect(result.status).toBe(200);expect(reached()).toBe(1);
+  });
+  it("applies the same narrow gate to a signed reader JWT", async () => {
+    const previous = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "owned-synthetic-reader-jwt-secret";
+    try {
+      const signed = createLocalAgentJwt(agentId, companyId, "process", randomUUID(), "synthetic-owner", { kind: "approval_reader" });
+      expect(signed).toBeTruthy();
+      const { app, reached } = readerApp({ kind: "approval_reader" }, true);
+      const allowed = await request(app).get(`/api/approvals/${approvalId}`).set("Authorization", `Bearer ${signed}`);
+      expect(allowed.status).toBe(200);
+      const denied = await request(app).post(`/api/approvals/${approvalId}/approve`).set("Authorization", `Bearer ${signed}`);
+      expect(denied.status).toBe(403);expect(reached()).toBe(1);
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+      else process.env.PAPERCLIP_AGENT_JWT_SECRET = previous;
+    }
   });
 });

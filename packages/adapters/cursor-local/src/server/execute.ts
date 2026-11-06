@@ -199,6 +199,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  const restrictedBinding = config.executionBindingMode !== undefined;
+  if (restrictedBinding) {
+    const profile = parseObject(config.env);
+    const explicitModel = asString(config.model, "");
+    if (
+      config.executionBindingMode !== "read_only" || executionTargetIsRemote ||
+      asStringArray(config.extraArgs).length > 0 || asStringArray(config.args).length > 0 ||
+      config.reasoningEffort !== undefined || config.effort !== undefined || config.modelReasoningEffort !== undefined ||
+      runtime.sessionId || runtime.sessionParams ||
+      typeof config.timeoutSec !== "number" || !Number.isFinite(config.timeoutSec) || config.timeoutSec <= 0 ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:/\[\],=+-]*$/.test(explicitModel) ||
+      ["auto", "default", "grok-build"].includes(explicitModel.toLowerCase()) ||
+      ["XDG_CONFIG_HOME", "CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"].some((key) => !path.isAbsolute(asString(profile[key], "")))
+    ) {
+      throw new Error("Invalid restricted cursor execution binding");
+    }
+  }
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -208,7 +225,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   let command = asString(config.command, "agent");
   const model = asString(config.model, DEFAULT_CURSOR_LOCAL_MODEL).trim();
-  const mode = normalizeMode(asString(config.mode, ""));
+  const mode = restrictedBinding ? "ask" : normalizeMode(asString(config.mode, ""));
 
   const workspaceContext = parseObject(context.paperclipWorkspace);
   const workspaceCwd = asString(workspaceContext.cwd, "");
@@ -230,7 +247,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   const cursorSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredCursorSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, cursorSkillEntries);
-  if (!executionTargetIsRemote) {
+  if (!executionTargetIsRemote && !restrictedBinding) {
     await ensureCursorSkillsInjected(onLog, {
       skillsEntries: cursorSkillEntries.filter(
         (entry) => desiredCursorSkillNames.includes(entry.key) && !isPaperclipSkillSourceMissing(entry),
@@ -344,7 +361,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (fromExtraArgs.length > 0) return fromExtraArgs;
     return asStringArray(config.args);
   })();
-  const autoTrustEnabled = !hasCursorTrustBypassArg(extraArgs);
+  const autoTrustEnabled = !restrictedBinding && !hasCursorTrustBypassArg(extraArgs);
   let restoreRemoteWorkspace: (() => Promise<void>) | null = null;
   let localSkillsDir: string | null = null;
   let remoteRuntimeRootDir: string | null = null;
@@ -600,6 +617,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (resumeSessionId) args.push("--resume", resumeSessionId);
     if (model) args.push("--model", model);
     if (mode) args.push("--mode", mode);
+    if (restrictedBinding) args.push("--sandbox", "enabled");
     if (autoTrustEnabled) args.push("--yolo");
     if (extraArgs.length > 0) args.push(...extraArgs);
     return args;
@@ -672,6 +690,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       timeoutSec,
       graceSec,
       stdin: prompt,
+      cleanupOwnedProcessGroup: restrictedBinding && process.platform === "linux",
       onSpawn,
       onRuntimeProgress: ctx.onRuntimeProgress,
       onLog: async (stream, chunk) => {
@@ -779,6 +798,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       costUsd: attempt.parsed.costUsd,
       costStatus: hasCompleteAccounting ? undefined : "unpriced",
       resultJson: {
+        ...(restrictedBinding ? { requestedModel: model, servedModel: null } : {}),
         stdout: attempt.proc.stdout,
         stderr: attempt.proc.stderr,
       },

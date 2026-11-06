@@ -134,6 +134,13 @@ export interface Project {
   privacyOwnerUserId?: string | null;
   status: ProjectStatus;
   leadAgentId: string | null;
+  /** Safe visibility only; detailed pins are restricted to the board policy endpoint. */
+  coordination?: {
+    revision: number;
+    configured: boolean;
+    executionReady: false;
+    readinessReason: "project_archived" | "policy_not_configured" | "coordinator_not_qualified";
+  };
   targetDate: string | null;
   color: string | null;
   icon: string | null;
@@ -178,4 +185,31 @@ export interface ProjectRepositoryOptions {
   repositories: ProjectRepository[];
   connectionCount: number;
   failedConnectionCount: number;
+}
+
+/** Durable project conversation identity; execution qualification is a separate contract. */
+export interface ProjectConversation {
+  companyId: string;
+  projectId: string;
+  masterIssue: {
+    id: string;
+    identifier: string | null;
+    title: string;
+    status: string;
+    assigneeUserId: string | null;
+  } | null;
+  executionReady: false;
+  automaticExecutionConfigured?: boolean;
+  readinessReason: "project_archived" | "coordinator_not_qualified";
+}
+
+
+export interface ProjectCoordinationPolicyReadiness {
+  companyId: string;
+  projectId: string;
+  leadAgentId: string | null;
+  revision: number;
+  policy: import("../validators/project.js").ProjectCoordinationPolicy | null;
+  executionReady: false;
+  readinessReasons: string[];
 }

@@ -49,6 +49,7 @@ import {
   PLUGIN_STATUSES,
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
+import { deliverPluginConfig, PluginConfigDeliveryError } from "../services/plugin-config-delivery.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import {
   getPluginUiContributionMetadata,
@@ -2450,41 +2451,53 @@ export function pluginRoutes(
       // If the worker implements onConfigChanged, send the new config via RPC.
       // If it doesn't (METHOD_NOT_IMPLEMENTED), restart the worker so it picks
       // up the new config on re-initialize. If no worker is running, skip.
-      if (bridgeDeps?.workerManager.isRunning(plugin.id)) {
-        // Refresh the worker's authorized proactive company scopes so the
-        // just-configured company can be acted on from proactive loops (e.g.
-        // the chat gateway's notifier drain) without requiring a restart
-        // (LOOA-629). The set is exactly the plugin's configured companies.
+      const configWorkerManager = bridgeDeps?.workerManager;
+      const worker = configWorkerManager?.getWorker(plugin.id);
+      if (worker && worker.status !== "running") {
+        res.status(503).json({
+          error: "Configuration was saved, but the app worker is unavailable. Reload the app to apply it.",
+          configSaved: true,
+          workerApplied: false,
+        });
+        return;
+      }
+      if (configWorkerManager && worker?.status === "running") {
         try {
-          const configRows = await registry.listConfigs(plugin.id);
-          bridgeDeps.workerManager.setProactiveCompanyScopes(
-            plugin.id,
-            configRows.map((row) => row.companyId),
-          );
-        } catch {
-          // Non-fatal: the set is rebuilt from the DB on the next worker start.
-        }
-
-        try {
-          await bridgeDeps.workerManager.call(
-            plugin.id,
-            "configChanged",
-            { config: body.configJson, companyId },
+          // Share ordering with startup/recovery and read current persisted
+          // rows inside it. A delayed request body must not undo a later save.
+          await deliverPluginConfig(
+            configWorkerManager,
+            worker,
+            () => registry.listConfigs(plugin.id),
           );
         } catch (rpcErr) {
+          const failures = rpcErr instanceof PluginConfigDeliveryError ? rpcErr.failures : [{ companyId, error: rpcErr }];
           if (
-            rpcErr instanceof JsonRpcCallError &&
-            rpcErr.code === PLUGIN_RPC_ERROR_CODES.METHOD_NOT_IMPLEMENTED
+            failures.length > 0 && failures.every(({ error }) => error instanceof JsonRpcCallError && error.code === PLUGIN_RPC_ERROR_CODES.METHOD_NOT_IMPLEMENTED) &&
+            !(rpcErr instanceof PluginConfigDeliveryError && rpcErr.workerUnavailable) &&
+            configWorkerManager.getWorker(plugin.id) === worker &&
+            worker.status === "running"
           ) {
             // Worker doesn't handle live config — restart it.
             try {
               await lifecycle.restartWorker(plugin.id);
+              res.json(result);
+              return;
             } catch {
-              // Restart failure is non-fatal for the config save response.
+              // Persistence succeeded, but application did not.
             }
           }
-          // Other RPC errors (timeout, unavailable) are non-fatal — config is
-          // already persisted and will take effect on next worker restart.
+          res.status(rpcErr instanceof PluginConfigDeliveryError && !rpcErr.workerUnavailable ? 502 : 503).json({
+            error: "Configuration was saved, but the worker could not apply all settings. Resolve the app error and reload it.",
+            configSaved: true,
+            workerApplied: false,
+            // Do not echo provider errors: they can contain credentials.
+            failures: failures.map(({ companyId: failedCompanyId, error }) => ({
+              companyId: failedCompanyId,
+              code: error instanceof JsonRpcCallError ? error.code : null,
+            })),
+          });
+          return;
         }
       }
 

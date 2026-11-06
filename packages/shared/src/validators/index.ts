@@ -358,6 +358,8 @@ export {
   upsertAgentInstructionsFileSchema,
   updateAgentInstructionsPathSchema,
   agentApiKeyScopeSchema,
+  projectCoordinatorRunScopeSchema,
+  type ProjectCoordinatorRunScope,
   normalizeAgentApiKeyScope,
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
@@ -395,6 +397,9 @@ export {
   createProjectSchema,
   updateProjectSchema,
   addProjectAccessMemberSchema,
+  ensureProjectConversationSchema,
+  projectCoordinationPolicySchema,
+  updateProjectCoordinationPolicySchema,
   createProjectWorkspaceSchema,
   updateProjectWorkspaceSchema,
   projectExecutionWorkspacePolicySchema,
@@ -991,3 +996,5 @@ export * from "./skill-source.js";
 export * from "./agent-commentary.js";
 export * from "./task-workspace.js";
 export * from "./workspace-repository.js";
+
+export type { ProjectCoordinationPolicy } from "./project.js";

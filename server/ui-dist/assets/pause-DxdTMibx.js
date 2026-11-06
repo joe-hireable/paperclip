@@ -1,0 +1,1 @@
+import{t as e}from"./createLucideIcon-pLB1SoiU.js";var t=[["rect",{x:"14",y:"3",width:"5",height:"18",rx:"1",key:"kaeet6"}],["rect",{x:"5",y:"3",width:"5",height:"18",rx:"1",key:"1wsw3u"}]],a=e("pause",t);export{a as t};

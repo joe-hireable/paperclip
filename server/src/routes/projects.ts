@@ -19,6 +19,8 @@ import {
   createProjectSchema,
   projectDiscoverySchema,
   type ProjectDiscoveryPage,
+  ensureProjectConversationSchema,
+  updateProjectCoordinationPolicySchema,
   createProjectWorkspaceSchema,
   deriveProjectUrlKey,
   findWorkspaceCommandDefinition,
@@ -36,8 +38,18 @@ import { accessService, projectService, logActivity, workspaceOperationService }
 import { conflict, forbidden, unprocessable } from "../errors.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+<<<<<<< upstream+partial-joe
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { ensureProjectAccessMember } from "../services/projects.js";
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+import { assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
++++ joe:
+import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
+import { issueService } from "../services/issues.js";
+import { projectCoordinationPolicyService } from "../services/project-coordination-policy.js";
+import { projectConversationService } from "../services/project-conversations.js";
+>>>>>>> joe
 import {
   buildWorkspaceRuntimeDesiredStatePatch,
   listConfiguredRuntimeServiceEntries,
@@ -78,6 +90,8 @@ export function projectRoutes(db: Db) {
     const available = await toolAccessService(db).listProjectRepositories(companyId, viewer.userId, viewer.localTrusted);
     return resolveProjectRepositorySelection(ids, available.repositories, existing);
   }
+  const coordination = projectCoordinationPolicyService(db);
+  const conversations = projectConversationService(db);
   const access = accessService(db);
   const secretsSvc = secretService(db);
   const workspaceOperations = workspaceOperationService(db);
@@ -373,6 +387,51 @@ export function projectRoutes(db: Db) {
     if (!(await assertProjectReadAllowed(req, res, project))) return;
     const summary = await externalObjectsSvc.getProjectSummary(project.id);
     res.json(summary);
+  });
+
+  router.get("/projects/:id/coordination-policy", async (req, res) => {
+    assertBoard(req);
+    const project = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Project not found");
+    if (!project || !(await assertProjectReadAllowed(req, res, project))) return;
+    res.json(await coordination.read(project.companyId, project.id));
+  });
+
+  router.put("/projects/:id/coordination-policy", validate(updateProjectCoordinationPolicySchema), async (req, res) => {
+    assertBoard(req);
+    const project = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Project not found");
+    if (!project) return;
+    res.json(await coordination.update(project.companyId, project.id, req.actor, req.body));
+  });
+
+  router.get("/projects/:id/conversation", async (req, res) => {
+    const project = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Project not found");
+    if (!project || !(await assertProjectReadAllowed(req, res, project))) return;
+    const conversation = await conversations.get(project.companyId, project.id);
+    if (conversation.masterIssue) {
+      const decision = await access.decide({ actor: req.actor, action: "issue:read", resource: {
+        type: "issue", companyId: project.companyId, projectId: project.id, issueId: conversation.masterIssue.id,
+      } });
+      if (!decision.allowed) throw forbidden("Conversation is outside this actor's authorization boundary");
+    }
+    res.json(conversation);
+  });
+
+  router.post("/projects/:id/conversation", validate(ensureProjectConversationSchema), async (req, res) => {
+    assertBoard(req);
+    const project = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Project not found");
+    if (!project || !(await assertProjectReadAllowed(req, res, project))) return;
+    const candidateId = req.body.adoptIssueId ?? (await conversations.get(project.companyId, project.id)).masterIssue?.id;
+    const candidate = candidateId ? await issueService(db).getById(candidateId) : null;
+    if (candidateId && (!candidate || candidate.companyId !== project.companyId || candidate.projectId !== project.id)) {
+      throw unprocessable("Adoption requires an issue in this project");
+    }
+    const decision = await access.decide({ actor: req.actor, action: candidate ? "issue:mutate" : "tasks:assign", resource: {
+      type: "issue", companyId: project.companyId, projectId: project.id, issueId: candidate?.id ?? null,
+      status: candidate?.status, assigneeAgentId: candidate?.assigneeAgentId ?? null,
+      assigneeUserId: candidate?.assigneeUserId ?? null,
+    } });
+    if (!decision.allowed) throw forbidden("Conversation is outside this actor's authorization boundary");
+    res.json(await conversations.ensure(project.companyId, project.id, getActorInfo(req).actorId, req.body.adoptIssueId));
   });
 
   router.post("/companies/:companyId/projects", validate(createProjectSchema), async (req, res) => {

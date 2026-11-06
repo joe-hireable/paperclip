@@ -1670,6 +1670,7 @@ describe("worktree helpers", () => {
       const sourceEnvPath = path.join(sourceConfigDir, ".env");
       const sourceKeyPath = path.join(sourceConfigDir, "secrets", "master.key");
       const worktreeHome = path.join(tempRoot, ".paperclip-worktrees");
+<<<<<<< upstream+partial-joe
       const sourceCluster = await startEmbeddedPostgresTestDatabase("paperclip-worktree-auth-source-");
       const sourceUrl = new URL(sourceCluster.connectionString);
       sourceUrl.pathname = "/lagging_source";
@@ -1695,6 +1696,14 @@ describe("worktree helpers", () => {
       for (const entry of priorEntries) {
         fs.copyFileSync(new URL(`${entry.tag}.sql`, migrationsRoot), path.join(priorMigrations, `${entry.tag}.sql`));
       }
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      const sourceDb = await startEmbeddedPostgresTestDatabase("paperclip-worktree-auth-source-");
+      onTestFinished(() => sourceDb.cleanup());
+
+      await seedValidWorktreeSource(sourceDb.connectionString);
++++ joe:
+>>>>>>> joe
       const sourceDbClient = createDb(sourceDb.connectionString);
       await migrate(drizzle(sourceDbClient.$client), { migrationsFolder: priorMigrations });
       const seed = await seedValidWorktreeSource(sourceDb.connectionString);
@@ -1710,6 +1719,28 @@ describe("worktree helpers", () => {
         VALUES (${seed.companyId}, 'agent', ${legacyAgentId}, 'pause')
       `;
       await sourceDbClient.$client.unsafe('ALTER TABLE resource_lifecycle_events ALTER COLUMN id DROP IDENTITY');
+      // A lagging source needs the predecessor schema as well as its journal.
+      // Deleting only the last ledger row would replay already-applied DDL.
+      const migrationsSource = new URL("../../../packages/db/src/migrations/", import.meta.url);
+      const migrationJournal = JSON.parse(
+        fs.readFileSync(new URL("meta/_journal.json", migrationsSource), "utf8"),
+      ) as { entries: Array<{ tag: string }> };
+      expect(migrationJournal.entries.length).toBeGreaterThan(2);
+      migrationJournal.entries.pop();
+      const migrationsFolder = path.join(tempRoot, "predecessor-migrations");
+      fs.mkdirSync(path.join(migrationsFolder, "meta"), { recursive: true });
+      fs.writeFileSync(
+        path.join(migrationsFolder, "meta", "_journal.json"),
+        JSON.stringify(migrationJournal),
+      );
+      for (const { tag } of migrationJournal.entries) {
+        fs.copyFileSync(new URL(`${tag}.sql`, migrationsSource), path.join(migrationsFolder, `${tag}.sql`));
+      }
+      await sourceDbClient.$client.unsafe(
+        'DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA drizzle CASCADE',
+      );
+      await migrate(sourceDbClient, { migrationsFolder });
+      await seedValidWorktreeSource(sourceDb.connectionString);
       await sourceDbClient.$client.unsafe(`
         WITH pair AS (
           SELECT

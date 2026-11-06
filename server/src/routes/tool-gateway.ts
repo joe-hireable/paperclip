@@ -202,7 +202,7 @@ async function handleMcpGatewayProtocol(
         result: {
           content: [{ type: "text", text: contentText }],
           structuredContent: resultRecord?.data ?? null,
-          isError: false,
+          isError: "isError" in result && result.isError === true,
         },
       });
       return;
@@ -221,7 +221,7 @@ async function handleMcpGatewayProtocol(
     res.status(404).json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } });
   } catch (err) {
     if (res.destroyed) return;
-    if (err instanceof ToolGatewayHttpError) {
+    if (err instanceof ToolGatewayHttpError || err instanceof HttpError) {
       const id = (req.body as { id?: unknown } | undefined)?.id ?? null;
       // Provider tool failures are MCP tool results, not successful calls or
       // protocol errors. The service has already recorded the failed invocation.
@@ -236,7 +236,11 @@ async function handleMcpGatewayProtocol(
       res.status(err.status).json({
         jsonrpc: "2.0",
         id,
-        error: { code: err.status >= 500 ? -32603 : -32000, message: err.message, data: { reasonCode: err.reasonCode, ...err.details } },
+        error: {
+          code: err.status >= 500 ? -32603 : -32000,
+          message: err.message,
+          data: err instanceof ToolGatewayHttpError ? { reasonCode: err.reasonCode, ...err.details } : err.details,
+        },
       });
       return;
     }
@@ -295,10 +299,14 @@ function normalizedAuditOutcome(
 
 function outcomeCondition(outcome: string) {
   if (outcome === "allowed") {
-    return or(
-      eq(toolCallEvents.eventType, "call_completed"),
-      and(eq(toolCallEvents.eventType, "approval_resolved"), eq(toolCallEvents.outcome, "success")),
-      eq(toolCallEvents.decision, "allow"),
+    return and(
+      sql`${toolCallEvents.eventType} <> 'call_failed'`,
+      sql`${toolCallEvents.outcome} not in ('failure', 'timeout', 'cancelled')`,
+      or(
+        eq(toolCallEvents.eventType, "call_completed"),
+        and(eq(toolCallEvents.eventType, "approval_resolved"), eq(toolCallEvents.outcome, "success")),
+        eq(toolCallEvents.decision, "allow"),
+      ),
     );
   }
   if (outcome === "blocked" || outcome === "denied") {
@@ -870,6 +878,7 @@ export function toolGatewayRoutes(db: Db, toolGateway: ToolGatewayService) {
         .select({
           row: toolCallEvents,
           invocationId: toolInvocations.id,
+          invocationGatewayId: toolInvocations.gatewayId,
           invocationAgentId: toolInvocations.agentId,
           invocationIssueId: toolInvocations.issueId,
           invocationApplicationId: toolInvocations.applicationId,
@@ -1010,6 +1019,7 @@ export function toolGatewayRoutes(db: Db, toolGateway: ToolGatewayService) {
 
         const item = candidate.item;
         const row = item.row;
+        const gatewayId = row.gatewayId ?? item.invocationGatewayId;
         const agentId = row.agentId ?? item.invocationAgentId;
         const connectionId = row.connectionId ?? item.invocationConnectionId;
         const connection = connectionId ? connectionsById.get(connectionId) ?? null : null;
@@ -1025,7 +1035,7 @@ export function toolGatewayRoutes(db: Db, toolGateway: ToolGatewayService) {
           ...(row.metadata ?? {}),
           invocationId: row.invocationId,
           actionRequestId: row.actionRequestId,
-          gatewayId: row.gatewayId,
+          gatewayId,
           agentId,
           issueId: row.issueId,
           runId: row.runId,

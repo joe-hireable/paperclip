@@ -147,7 +147,14 @@ import {
 } from "./workspace-command-authz.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { environmentService } from "../services/environments.js";
+<<<<<<< upstream+partial-joe
 
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+import { resolveEnvironmentExecutionTarget } from "../services/environment-execution-target.js";
++++ joe:
+import { executionBindingService } from "../services/execution-bindings.js";
+>>>>>>> joe
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import { resolvePluginSandboxProviderDriverByKey } from "../services/plugin-environment-driver.js";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
@@ -597,9 +604,23 @@ export function agentRoutes(
   const KNOWN_INSTRUCTIONS_BUNDLE_KEY_SET: ReadonlySet<string> = new Set(KNOWN_INSTRUCTIONS_BUNDLE_KEYS);
 
   const router = Router();
+<<<<<<< upstream+partial-joe
   const managementGuard = connectionManagementGuard(db, "ai");
   const svc = agentService(db, { cancelWorkForScope: scope => heartbeat.cancelBudgetScopeWork(scope) });
   const svcLifecycle = createAgentLifecycle(db, { cancelWorkForScope: scope => heartbeat.cancelBudgetScopeWork(scope) });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  const svc = agentService(db);
++++ joe:
+  const executionBindingsSvc = executionBindingService(db);
+  async function assertUnboundAdapterAllowed(type: string) {
+    if (await executionBindingsSvc.isRegisteredHarness(type)) {
+      throw conflict("This harness requires a qualified task execution binding", {
+        code: "execution_binding_required",
+      });
+    }
+  }
+>>>>>>> joe
   const access = accessService(db);
   const approvalsSvc = approvalService(db);
   const budgets = budgetService(db);
@@ -3086,9 +3107,23 @@ export function agentRoutes(
       res.status(404).json({ error: "Environment not found" });
       return;
     }
+<<<<<<< upstream+partial-joe
     const provider = asNonEmptyString(req.query.provider);
     if (type === "paperclip_runner" && provider === "acpx" && req.query.acpxAgent === "kimi") {
       res.json([]);
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+    if (type === "opencode_local" && environment && environment.driver !== "local") {
+      const adapter = requireServerAdapter(type);
+      res.json(adapter.models ?? []);
++++ joe:
+    if (await executionBindingsSvc.isRegisteredHarness(type)) {
+      if (refresh) await assertUnboundAdapterAllowed(type);
+      res.setHeader("X-Paperclip-Model-Source", "qualified-bindings");
+      res.json(await executionBindingsSvc.listQualifiedModels(companyId, type));
+      return;
+    }
+>>>>>>> joe
       return;
     }
     if (type === "paperclip_runner" && provider === "acpx" && req.query.acpxAgent === "antigravity") {
@@ -3173,6 +3208,11 @@ export function agentRoutes(
     assertCompanyAccess(req, companyId);
     const type = assertKnownAdapterType(req.params.type as string);
 
+    if (await executionBindingsSvc.isRegisteredHarness(type)) {
+      res.setHeader("X-Paperclip-Model-Source", "qualified-bindings");
+      res.json(null);
+      return;
+    }
     const detected = await detectAdapterModel(type);
     res.json(detected);
   });
@@ -3398,6 +3438,7 @@ export function agentRoutes(
         res.json(pluginRunnerAiConnectionRequiredTestResult(type, preconfiguredTestHome));
         return;
       }
+      await assertUnboundAdapterAllowed(type);
       const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
         companyId,
         adapterConfigForTest,
@@ -3506,6 +3547,7 @@ export function agentRoutes(
           return;
         }
 
+<<<<<<< upstream+partial-joe
         // Probe-only credentials bypass storage, not authorization. The schema
         // allows only provider key names; they never enter persisted config.
         if (req.body.testCredentials) {
@@ -3527,6 +3569,14 @@ export function agentRoutes(
           tested.checks.unshift({ code: "ai_connection_tested", level: "info", message: `Tested ${managed.accountName} — ${managed.accountOwnerUserId ? managed.accountOwnerUserId === responsibleUserForAiRequest(req) ? "your personal account" : "the owner’s account authorized for this agent" : "company-shared account"}. Responsible user: ${req.actor.type === "agent" ? responsibleUserForAiRequest(req) ?? "unavailable" : "the signed-in user"}.` });
           return tested;
         }) : await adapter.testEnvironment({ companyId, adapterType: type, config: effectiveAdapterConfig, executionTarget, environmentName });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+        const result = await adapter.testEnvironment({
+          companyId,
+          adapterType: type,
++++ joe:
+        await assertUnboundAdapterAllowed(type);
+>>>>>>> joe
 
         const prefixChecks = [
           ...(sandboxIdentityCheck ? [sandboxIdentityCheck] : []),

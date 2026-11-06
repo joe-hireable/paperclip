@@ -362,6 +362,7 @@ export type {
   DocumentTextRange,
   UpdateDocumentAnnotationThreadRequest,
 } from "./document-annotation.js";
+<<<<<<< upstream+partial-joe
 export type {
   Project,
   ProjectRepository,
@@ -380,6 +381,12 @@ export type {
   ProjectWorkspace,
   ProjectWorkspaceProviderConfiguration,
 } from "./project.js";
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+export type { Project, ProjectBudgetSummary, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectManagedByPlugin, ProjectWorkspace } from "./project.js";
++++ joe:
+export type { Project, ProjectConversation, ProjectCoordinationPolicyReadiness, ProjectBudgetSummary, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectManagedByPlugin, ProjectWorkspace } from "./project.js";
+>>>>>>> joe
 export type {
   CompanySearchCountType,
   CompanySearchExtractIssueResult,

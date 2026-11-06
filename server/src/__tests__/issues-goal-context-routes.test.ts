@@ -145,7 +145,7 @@ vi.mock("../services/execution-workspaces.js", () => ({
   STALE_REOPEN_PENDING_CONSUMPTION_GRACE_MS: 5 * 60 * 1000,
 }));
 
-function createApp() {
+function createApp(actorOverrides: Record<string, unknown> = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -155,6 +155,7 @@ function createApp() {
       companyIds: ["company-1"],
       source: "local_implicit",
       isInstanceAdmin: false,
+      ...actorOverrides,
     };
     next();
   });
@@ -290,6 +291,75 @@ describe("issue goal context routes", () => {
       status: legacyProjectLinkedIssue.status,
     });
     expect(issue).not.toHaveProperty("productivityReview");
+  });
+
+  it.each(["board", "agent"])("returns full execution authority for an authorised %s without workspace hydration", async (actorType) => {
+    const description = "Original human request — preserve every character. ".repeat(100);
+    const assigneeAdapterOverrides = {
+      executionBinding: {
+        bindingId: "55555555-5555-4555-8555-555555555555",
+        model: "synthetic-model",
+        requiredCapabilities: ["text", "local_shell", "patch_proposal"],
+        dataClass: "private",
+        reason: "Use the qualified execution binding",
+        evidenceRefs: ["synthetic-qualification-evidence"],
+      },
+    };
+    mockIssueService.getById.mockResolvedValueOnce({
+      description,
+      assigneeAdapterOverrides,
+      executionWorkspaceId: "66666666-6666-4666-8666-666666666666",
+    });
+    mockExecutionWorkspaceService.getById.mockRejectedValue(new Error("Workspace hydration must not run"));
+
+    const res = await request(createApp(actorType === "agent" ? {
+      type: "agent",
+      agentId: legacyProjectLinkedIssue.assigneeAgentId,
+      companyId: "company-1",
+      source: "agent_key",
+    } : {})).get(`/api/issues/${legacyProjectLinkedIssue.id}?view=execution-authority`);
+
+    expect(res.body).toEqual({
+      id: legacyProjectLinkedIssue.id,
+      companyId: "company-1",
+      projectId: legacyProjectLinkedIssue.projectId,
+      status: "todo",
+      description,
+      assigneeAdapterOverrides,
+    });
+    expect(mockAccessService.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "issue:read" }));
+    expect(mockIssueService.getAncestors).not.toHaveBeenCalled();
+    expect(mockDocumentsService.getIssueDocumentPayload).not.toHaveBeenCalled();
+    expect(mockExecutionWorkspaceService.getById).not.toHaveBeenCalled();
+    expect(mockWorkProductService.listForIssue).not.toHaveBeenCalled();
+  });
+
+  it.each(["view=", "view=unknown", "view=execution-authority&view=execution-authority"])("rejects invalid issue view %s", async (query) => {
+    const res = await request(createApp()).get(`/api/issues/${legacyProjectLinkedIssue.id}?${query}`);
+    expect(res.status).toBe(400);
+    expect(res.body).not.toHaveProperty("description");
+    expect(mockIssueService.getAncestors).not.toHaveBeenCalled();
+  });
+
+  it.each(["execution-authority", "unknown"])("keeps cross-company issue existence private before validating view %s", async (view) => {
+    const res = await request(createApp({
+      type: "agent",
+      companyId: "another-company",
+      agentId: "another-agent",
+      source: "agent_key",
+    })).get(`/api/issues/${legacyProjectLinkedIssue.id}?view=${view}`);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "Issue not found" });
+    expect(mockAccessService.decide).not.toHaveBeenCalled();
+    expect(mockIssueService.getAncestors).not.toHaveBeenCalled();
+  });
+
+  it("preserves issue-read denial before returning execution authority", async () => {
+    mockAccessService.decide.mockResolvedValueOnce({ allowed: false });
+    const res = await request(createApp()).get(`/api/issues/${legacyProjectLinkedIssue.id}?view=execution-authority`);
+    expect(res.status).toBe(403);
+    expect(res.body).not.toHaveProperty("description");
+    expect(mockIssueService.getAncestors).not.toHaveBeenCalled();
   });
 
   it("surfaces the project goal from GET /issues/:id when the issue has no direct goal", async () => {

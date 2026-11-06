@@ -17,6 +17,7 @@ import type { Agent, HeartbeatRun } from "@paperclipai/shared";
 import { agentsApi } from "@/api/agents";
 import { instanceSettingsApi } from "@/api/instanceSettings";
 import { CoordinatorPresentation } from "@/components/coordinator/CoordinatorPresentation";
+import { PendingIntakeError } from "../../lib/use-master-intake";
 import { DRAFT_DEBOUNCE_MS } from "../../lib/composer-draft";
 import {
   loadDraftSubmission,
@@ -2060,6 +2061,38 @@ describe("TaskChatComposer", () => {
     expect(
       trigger.querySelector('[data-assignee-trigger-avatar="u1"]'),
     ).not.toBeNull();
+  });
+
+  it("master intake never infers reopen or reassignment", async () => {
+    const onAdd = vi.fn(async () => {});
+    render(<TaskChatComposer onAdd={onAdd} workMode="standard" masterIntake
+      issueStatus="done" currentAssigneeValue="agent:a1" enableReassign
+      reassignOptions={[{ id: "agent:a1", label: "Agent" }]} />);
+    typeText("A project thought");
+    pressKey("Enter", { metaKey: true });
+    await flushAsync();
+    expect(onAdd).toHaveBeenCalledWith("A project thought", undefined, undefined);
+    expect(container.querySelector('[role="combobox"]')).toBeNull();
+  });
+
+  it("keeps a master pending envelope separate from a newer draft on ambiguous failure", async () => {
+    let reject!: (error: Error) => void;
+    const onAdd = vi.fn().mockReturnValue(new Promise<void>((_resolve, fail) => { reject = fail; }));
+    render(<TaskChatComposer onAdd={onAdd} workMode="standard" masterIntake draftKey="master-draft" />);
+    typeText("submitted original"); pressKey("Enter", { metaKey: true }); await flushAsync();
+    typeText("separate next draft"); reject(new PendingIntakeError("response lost")); await flushAsync(); await flushAsync();
+    expect(editable().textContent).toBe("separate next draft");
+    expect(onAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes an attachment already retained in the master envelope after an ambiguous send", async () => {
+    const onAdd = vi.fn().mockRejectedValue(new PendingIntakeError("response lost"));
+    const onAttachImage = vi.fn().mockResolvedValue({ contentPath: "/attachments/notes.txt", originalFilename: "notes.txt" });
+    render(<TaskChatComposer onAdd={onAdd} workMode="standard" masterIntake onAttachImage={onAttachImage} />);
+    typeText("Original"); pasteFiles([new File(["plain"], "notes.txt", { type: "text/plain" })]); await flushAsync();
+    pressKey("Enter", { metaKey: true }); await flushAsync(); await flushAsync();
+    expect(onAdd).toHaveBeenCalledWith("Original\n\n[notes.txt](/attachments/notes.txt)", undefined, undefined);
+    expect(container.querySelector('[data-testid="task-chat-composer-attachments"]')?.textContent ?? "").not.toContain("notes.txt");
   });
 
   describe("draft persistence", () => {

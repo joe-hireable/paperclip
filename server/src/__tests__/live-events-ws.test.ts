@@ -106,6 +106,41 @@ describe("setupLiveEventsWebSocketServer", () => {
     }
   });
 
+  it.each(["bearer", "query"])("rejects approval-reader %s credentials before WebSocket upgrade", async (transport) => {
+    const update = vi.fn(() => ({ set: () => ({ where: async () => [] }) }));
+    const db = {
+      select: () => ({ from: () => ({ where: async () => [{
+        id: "owned-reader-key", companyId: "company-1", agentId: "owned-reader-agent",
+        scopeConfig: { kind: "approval_reader" }, revokedAt: null,
+      }] }) }),
+      update,
+    };
+    const wss = setupLiveEventsWebSocketServer(server as never, db as never, { deploymentMode: "local_trusted" });
+    const upgrade = vi.spyOn(wss, "handleUpgrade").mockImplementation(() => {});
+    const req = createUpgradeRequest(transport === "bearer"
+      ? { headers: { authorization: "Bearer pcp_owned_synthetic_reader" } }
+      : { url: "/api/companies/company-1/events/ws?token=pcp_owned_synthetic_reader" });
+      server.emit("upgrade", req, socket as unknown as Duplex, Buffer.alloc(0));
+      expect(socket.endedChunks[0]).toContain("403 Forbidden");
+      expect(upgrade).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    } finally { (wss as unknown as EventEmitter).emit("close"); }
+  });
+
+  it.each([null, { kind: "standard" }])("preserves WebSocket access for the existing key scope %j", async (scopeConfig) => {
+    const db = {
+      select: () => ({ from: () => ({ where: async () => [{
+        id: "owned-standard-key", companyId: "company-1", agentId: "owned-standard-agent", scopeConfig,
+      }] }) }),
+      update: () => ({ set: () => ({ where: async () => [] }) }),
+    };
+    const wss = setupLiveEventsWebSocketServer(server as never, db as never, { deploymentMode: "authenticated" });
+    const upgrade = vi.spyOn(wss, "handleUpgrade").mockImplementation(() => {});
+      server.emit("upgrade", createUpgradeRequest({ headers: { authorization: "Bearer pcp_owned_synthetic_standard" } }), socket as unknown as Duplex, Buffer.alloc(0));
+      expect(upgrade).toHaveBeenCalledTimes(1);
+    } finally { (wss as unknown as EventEmitter).emit("close"); }
+  });
+
   it("does not write a rejection response after the raw upgrade socket is already closed", async () => {
     const server = new EventEmitter();
     setupLiveEventsWebSocketServer(server as never, {} as never, { deploymentMode: "authenticated" });

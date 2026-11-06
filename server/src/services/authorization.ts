@@ -2279,6 +2279,10 @@ function createAuthorizationService(db: Db | DbTransaction, readSnapshot?: ReadA
       return deny({ action: input.action, reason: "deny_scope", explanation: "Scoped test and task bridge credentials cannot administer connections." });
     }
 
+    if (input.actor.keyScope?.kind === "project_coordinator") {
+      return deny({ action: input.action, reason: "deny_scope", explanation: "Coordinator run tokens require the task envelope." });
+    }
+
     if (input.actor.keyScope?.kind === "skill_test") {
       const skillTestDecision = decideSkillTestAccess({
         action: input.action,

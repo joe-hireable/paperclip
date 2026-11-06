@@ -1,3 +1,4 @@
+import { PendingIntakeError } from "../lib/use-master-intake";
 // @vitest-environment jsdom
 
 import {
@@ -3847,6 +3848,36 @@ describe("IssueChatThread", () => {
     act(() => {
       root.unmount();
     });
+  });
+
+  it("master intake omits classic reopen and reassignment", async () => {
+    const root = createRoot(container);
+    act(() => { root.render(<MemoryRouter><IssueChatThread comments={[]} linkedRuns={[]} timelineEvents={[]} liveRuns={[]}
+      masterIntake issueStatus="done" currentAssigneeValue="agent:agent-1" enableReassign
+      reassignOptions={[{ id: "agent:agent-1", label: "Agent" }]} onAdd={async () => {}} enableLiveTranscriptPolling={false} /></MemoryRouter>); });
+    const editor = container.querySelector('textarea[aria-label="Issue chat editor"]') as HTMLTextAreaElement;
+    act(() => { Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(editor, "Master thought"); editor.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => { Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Send")?.click(); });
+    expect(appendMock).toHaveBeenCalledWith(expect.objectContaining({ runConfig: { custom: {} } }));
+    expect(container.querySelector('[role="combobox"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("keeps the classic next draft separate when the master envelope is pending", async () => {
+    let reject!: (error: Error) => void;
+    appendMock.mockReturnValueOnce(new Promise<undefined>((_resolve, fail) => { reject = fail; }));
+    const root = createRoot(container);
+    act(() => { root.render(<MemoryRouter><IssueChatThread comments={[]} linkedRuns={[]} timelineEvents={[]} liveRuns={[]}
+      masterIntake draftKey="master-classic-next" onAdd={async () => {}} enableLiveTranscriptPolling={false} /></MemoryRouter>); });
+    const editor = container.querySelector('textarea[aria-label="Issue chat editor"]') as HTMLTextAreaElement;
+    const type = (value: string) => act(() => { Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(editor, value); editor.dispatchEvent(new Event("input", { bubbles: true })); });
+    type("Original message");
+    await act(async () => { Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Send")?.click(); });
+    type("Next draft");
+    await act(async () => { reject(new PendingIntakeError("response lost")); await Promise.resolve(); });
+    expect(editor.value).toBe("Next draft"); expect(appendMock).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem("master-classic-next")).toBe("Next draft");
+    act(() => root.unmount());
   });
 
   it("opens a warning dialog before sending a reply with no assignee selected and posts on Send anyway", async () => {

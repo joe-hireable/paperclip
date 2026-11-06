@@ -71,6 +71,7 @@ export const createAgentInstructionsBundleSchema = z.object({
 
 export const agentRuntimeConfigSchema = z.object({
   aiConnection: aiConnectionBindingSchema.optional(),
+  executionBindingRequired: z.boolean().optional(),
   debug: z.object({
     providerTrace: z.literal("raw").optional(),
   }).strict().optional(),
@@ -221,11 +222,23 @@ export const skillTestAgentKeyScopeSchema = z.object({
   issueId: z.string().guid(),
 }).strict();
 
-export const agentApiKeyScopeSchema = z.union([
+export const projectCoordinatorRunScopeSchema = z.object({
+  kind: z.literal("project_coordinator"),
+  projectId: z.string().uuid(),
+  intakeIssueId: z.string().uuid(),
+  attemptIssueId: z.string().uuid(),
+  authorityDigest: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+const persistentAgentKeyScopeSchema = z.union([
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
   skillTestAgentKeyScopeSchema,
+  z.object({ kind: z.literal("approval_reader") }).strict(),
 ]);
+
+export const agentApiKeyScopeSchema = z.union([persistentAgentKeyScopeSchema, projectCoordinatorRunScopeSchema]);
+export type ProjectCoordinatorRunScope = z.infer<typeof projectCoordinatorRunScopeSchema>;
 
 export type AgentApiKeyScope = z.infer<typeof agentApiKeyScopeSchema>;
 export type TaskBridgeAgentKeyScope = z.infer<typeof taskBridgeAgentKeyScopeSchema>;
@@ -238,7 +251,7 @@ export function normalizeAgentApiKeyScope(value: unknown): AgentApiKeyScope {
 
 export const createAgentKeySchema = z.object({
   name: z.string().min(1).default("default"),
-  scope: agentApiKeyScopeSchema.optional().default({ kind: "standard" }),
+  scope: persistentAgentKeyScopeSchema.optional().default({ kind: "standard" }),
 });
 
 export type CreateAgentKey = z.infer<typeof createAgentKeySchema>;

@@ -1844,6 +1844,7 @@ describeEmbeddedPostgres("applyPendingMigrations", () => {
 
         const nativeRowsBefore = await verifySql.unsafe<{ table_name: string; row_count: number }[]>(`
           SELECT 'completion_contracts' AS table_name, count(*)::int AS row_count FROM completion_contracts
+          UNION ALL SELECT 'intelligent_routing_contracts', count(*)::int FROM intelligent_routing_contracts
           UNION ALL SELECT 'native_run_results', count(*)::int FROM native_run_results
           UNION ALL SELECT 'native_run_finalizations', count(*)::int FROM native_run_finalizations
           UNION ALL SELECT 'work_assessments', count(*)::int FROM work_assessments

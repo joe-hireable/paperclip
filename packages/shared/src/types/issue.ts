@@ -165,6 +165,7 @@ export interface IssueParentAdjustment {
 }
 
 export interface IssueAssigneeAdapterOverrides {
+  executionBinding?: import("../execution-bindings.js").ExecutionBindingSelection;
   adapterConfig?: Record<string, unknown>;
   useProjectWorkspace?: boolean;
 }

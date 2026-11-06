@@ -25,6 +25,7 @@ export interface AgentPermissions extends Record<string, unknown> {
   authorizationPolicy?: TrustAuthorizationPolicy;
 }
 
+<<<<<<< upstream+partial-joe
 export interface AgentProjectAccess {
   projectIds: string[];
   canManage: boolean;
@@ -33,6 +34,14 @@ export interface AgentProjectAccess {
 export type AgentRuntimeConfig = Record<string, unknown> & {
   aiConnection?: import("../ai-connection-router.js").AiRuntimeConnectionBinding;
 };
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+export type AgentRuntimeConfig = Record<string, unknown>;
++++ joe:
+export type AgentRuntimeConfig = Record<string, unknown> & {
+  executionBindingRequired?: boolean;
+};
+>>>>>>> joe
 
 export type AgentInstructionsBundleMode = "managed" | "external";
 

@@ -61,6 +61,8 @@ import {
   acceptSteeredIdentity,
   rejectSteeredIdentity,
 } from "../services/run-identity.js";
+import { startCoordinatorAttemptSchema, coordinatorResultSchema, prepareCoordinatorAttemptSchema, projectCoordinatorAttemptService } from "../services/project-coordinator-attempts.js";
+import { projectCoordinatorIntakeService } from "../services/project-coordinator-intake.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
@@ -3640,10 +3642,31 @@ export function issueRoutes(
     await executeIssuePostCommitActions(db, actions);
   };
 
+<<<<<<< upstream+partial-joe
   const memoizeIssueRead = createRequestPromiseMemo<
     Request,
     Awaited<ReturnType<typeof svc.getById>>
   >({
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+  const memoizeIssueRead = createRequestPromiseMemo<Request, Awaited<ReturnType<typeof svc.getById>>>({
++++ joe:
+  async function acceptCoordinatorIntake(req: Request, issue: Awaited<ReturnType<typeof svc.getById>>, body: string, patch: boolean) {
+    if (!issue || issue.originKind !== "project_master_chat") return null;
+    const allowed = new Set(patch ? ["comment", "intakeRequestId"] : ["body", "intakeRequestId"]);
+    if (req.actor.type !== "board") throw forbidden("Only board input can create coordinator intake");
+    if (Object.keys(req.body).some(key => !allowed.has(key) &&
+      !(["reopen", "resume", "interrupt"].includes(key) && req.body[key] === false) &&
+      !(key === "authorType" && req.body[key] === "user"))) {
+      throw unprocessable("Post coordinator intake separately from issue changes or structured metadata");
+    }
+    const accepted = await projectCoordinatorIntakeService(db).addComment({ masterId: issue.id, body, requestId: req.body.intakeRequestId, actor: req.actor, sourceTrust: await sourceTrustForActorWrite(issue, getActorInfo(req)) });
+    const { projectCoordinatorProgressionService } = await import("../services/project-coordinator-progression.js");
+    await projectCoordinatorProgressionService(db, heartbeat.wakeup).advance(accepted.intake.id);
+    return accepted;
+  }
+
+>>>>>>> joe
     shouldCache: (issue) => issue !== null,
   });
   const memoizeIssueReadDecision = createRequestPromiseMemo<
@@ -9693,6 +9716,7 @@ export function issueRoutes(
       "Issue not found",
     );
     if (!issue) return;
+<<<<<<< upstream+partial-joe
     if (!(await timing.time("authorization", () => assertIssueReadAllowed(req, res, issue, { allowBreakGlass: true })))) return;
     // Saved cards are structural conversation data. Include their local
     // projection before first paint, independently of slow recovery, workspace
@@ -9710,6 +9734,31 @@ export function issueRoutes(
       req.actor.type === "board" && req.actor.userId
         ? timing.time("inbox", () => svc.getActiveInboxArchiveFields(issue, req.actor.userId!))
         : Promise.resolve({});
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const inboxArchiveFieldsPromise = req.actor.type === "board" && req.actor.userId
+      ? svc.getActiveInboxArchiveFields(issue, req.actor.userId)
+      : Promise.resolve({});
++++ joe:
+    const view = req.query.view;
+    if (view !== undefined && view !== "execution-authority") {
+      res.status(400).json({ error: "Invalid issue view" });
+      return;
+    }
+    if (view === "execution-authority") {
+      res.json({
+        id: issue.id,
+        companyId: issue.companyId,
+        projectId: issue.projectId,
+        assigneeAgentId: issue.assigneeAgentId,
+        status: issue.status,
+        description: issue.description,
+        assigneeAdapterOverrides: issue.assigneeAdapterOverrides,
+      });
+      return;
+    }
+>>>>>>> joe
     const [
       { project, goal },
       ancestors,
@@ -10729,6 +10778,31 @@ export function issueRoutes(
       });
     },
   );
+
+  router.post("/issues/:id/coordinator-attempt", validate(prepareCoordinatorAttemptSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(String(req.params.id)), "Issue not found");
+    if (!issue) return;
+    res.json(await projectCoordinatorAttemptService(db).prepare(issue.id, req.actor, req.body));
+  });
+  router.post("/issues/:id/coordinator-start", validate(startCoordinatorAttemptSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(String(req.params.id)), "Issue not found");
+    if (!issue) return;
+    const result = await projectCoordinatorAttemptService(db).admit(issue.id, req.actor, req.body);
+    if (result.enqueue && result.agentId) await heartbeat.wakeup(result.agentId, {
+      source: "on_demand", triggerDetail: "manual", reason: "project_coordinator_admitted",
+      requestedByActorType: "user", requestedByActorId: req.actor.userId,
+      contextSnapshot: {issueId:issue.id}, idempotencyKey: `coordinator:${issue.id}`,
+    });
+    res.json(result);
+  });
+  router.get("/issues/:id/coordinator-context", async (req, res) => {
+    res.json(await projectCoordinatorAttemptService(db).taskEnvelope(String(req.params.id), req.actor));
+  });
+  router.put("/issues/:id/coordinator-result", validate(coordinatorResultSchema), async (req, res) => {
+    res.json(await projectCoordinatorAttemptService(db).taskEnvelope(String(req.params.id), req.actor, req.body.body, req.body.handoff));
+  });
 
   router.get("/issues/:id/work-products", async (req, res) => {
     const id = req.params.id as string;
@@ -14241,7 +14315,21 @@ export function issueRoutes(
         "Use paperclip_block for a blocker. Paperclip sets the task status from that report.",
       { code: "native_run_status_reported_by_finish", requestedStatus },
     );
+<<<<<<< upstream+partial-joe
   }
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+    if (!issueMutationAccess) return;
+    const issueMutationAuthorizationReason = req.actor.type === "agent"
+      ? issueWriteAuthorizationReason(req, await decideIssueAccess(req, existing, "issue:mutate"))
+      : issueWriteAuthorizationReason(req, true);
++++ joe:
+    if (existing.originKind === "project_master_chat" && req.body.comment) {
+      const intake = await acceptCoordinatorIntake(req, existing, req.body.comment, true);
+      res.json({ ...existing, comment: intake!.comment, coordinatorIntake: intake!.intake, intakeRequestId: intake!.requestId, changes: {} });
+      return;
+    }
+>>>>>>> joe
 
   router.patch(
     "/issues/:id",
@@ -14347,6 +14435,7 @@ export function issueRoutes(
       const existingRelations = Array.isArray(req.body.blockedByIssueIds)
         ? await svc.getRelationSummaries(existing.id)
         : null;
+<<<<<<< upstream+partial-joe
       const {
         comment: commentBody,
         commentClientRequestId,
@@ -14435,6 +14524,16 @@ export function issueRoutes(
         actor: req.actor,
         action: "project:read",
         resource: { type: "project", companyId: existing.companyId, projectId: selectedProject.id },
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+    const {
+      comment: commentBody,
+      reviewInteractionId: requestedReviewInteractionId,
+      reviewRequest,
+      reopen: reopenRequested,
++++ joe:
+      intakeRequestId: _intakeRequestId,
+>>>>>>> joe
       });
       if (!projectDecision.allowed) {
         res.status(404).json({ error: "Project not found" });
@@ -19034,6 +19133,7 @@ export function issueRoutes(
     res.json(bundle);
   });
 
+<<<<<<< upstream+partial-joe
   router.get("/companies/:companyId/chats", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -19042,6 +19142,21 @@ export function issueRoutes(
     const conversations = await svc.listConversations(companyId, req.actor.userId);
     res.json(await withConversationReadState(db, companyId, req.actor.userId, await filterIssuesForActor(req, conversations)));
   });
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+    }
+    const commentAccessDecision = await assertAgentIssueCommentAllowed(req, res, issue);
+    if (!commentAccessDecision) return;
+    const commentAuthorizationReason = issueWriteAuthorizationReason(req, commentAccessDecision);
+    if (!assertStructuredCommentFieldsAllowed(req, res, {
+      presentation: req.body.presentation,
++++ joe:
+    if (issue.originKind === "project_master_chat") {
+      const intake = await acceptCoordinatorIntake(req, issue, req.body.body, false);
+      res.status(201).json({ ...intake!.comment, coordinatorIntake: intake!.intake, intakeRequestId: intake!.requestId });
+      return;
+    }
+>>>>>>> joe
 
   // GET stays read-only. POST resolves the single chat on explicit add or first send/upload.
   for (const method of ["get", "post"] as const) {

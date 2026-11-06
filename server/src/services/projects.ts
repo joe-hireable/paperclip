@@ -27,6 +27,7 @@ import {
   type BudgetWindowKind,
   type ProjectBudgetSummary,
   type ProjectDiscoverySummary,
+  type Project,
   type ProjectCodebase,
   type ProjectExecutionWorkspacePolicy,
   type ProjectGoalRef,
@@ -137,7 +138,8 @@ export async function ensurePersonalPrivateProject(dbOrTx: any, companyId: strin
   return project;
 }
 
-interface ProjectWithGoals extends Omit<ProjectRow, "executionWorkspacePolicy"> {
+interface ProjectWithGoals extends Omit<ProjectRow, "executionWorkspacePolicy" | "coordinationPolicy" | "coordinationPolicyRevision"> {
+  coordination: Project["coordination"];
   urlKey: string;
   goalIds: string[];
   goals: ProjectGoalRef[];
@@ -158,6 +160,22 @@ interface ProjectShortnameRow {
 
 interface ResolveProjectNameOptions {
   excludeProjectId?: string | null;
+}
+
+/** Shared project-row projection for ordinary project and embedded detail responses. */
+export function toProjectReadModel(row: ProjectRow) {
+  const { coordinationPolicy, coordinationPolicyRevision, ...publicProject } = row;
+  return {
+    ...publicProject,
+    coordination: {
+      revision: coordinationPolicyRevision,
+      configured: coordinationPolicy !== null,
+      executionReady: false as const,
+      readinessReason: row.archivedAt
+        ? "project_archived" as const
+        : coordinationPolicy === null ? "policy_not_configured" as const : "coordinator_not_qualified" as const,
+    },
+  };
 }
 
 /** Batch-load goal refs for a set of projects. */
@@ -190,7 +208,7 @@ async function attachGoals(db: Db, rows: ProjectRow[]): Promise<ProjectWithGoals
   return rows.map((r) => {
     const g = map.get(r.id) ?? [];
     return {
-      ...r,
+      ...toProjectReadModel(r),
       urlKey: deriveProjectUrlKey(r.name, r.id),
       goalIds: g.map((x) => x.id),
       goals: g,
@@ -650,11 +668,24 @@ async function ensureSinglePrimaryWorkspace(
     );
 }
 
+<<<<<<< upstream+partial-joe
 export function projectService(db: Db, options: { captureWorkspaceUpdates?: boolean } = {}) {
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+export function projectService(db: Db) {
++++ joe:
+function rejectCoordinationPolicyMutation(data: object) {
+  if ("coordinationPolicy" in data || "coordinationPolicyRevision" in data) {
+    throw unprocessable("Use the dedicated project coordination policy endpoint");
+  }
+}
+
+>>>>>>> joe
   const createProject = async (
     companyId: string,
     data: Omit<typeof projects.$inferInsert, "companyId"> & { goalIds?: string[] },
   ): Promise<ProjectWithGoals> => {
+    rejectCoordinationPolicyMutation(data);
     const { goalIds: inputGoalIds, ...projectData } = data;
     const ids = resolveGoalIds({ goalIds: inputGoalIds, goalId: projectData.goalId });
     if (ids && ids.length > 0) await assertGoalsBelongToCompany(db, companyId, ids);
@@ -971,8 +1002,15 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
     update: async (
       id: string,
       data: Partial<typeof projects.$inferInsert> & { goalIds?: string[] },
+<<<<<<< upstream+partial-joe
     ): Promise<ProjectWithGoals | null> => db.transaction(async tx => {
       const db = tx as unknown as Db;
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+    ): Promise<ProjectWithGoals | null> => {
++++ joe:
+      rejectCoordinationPolicyMutation(data);
+>>>>>>> joe
       const { goalIds: inputGoalIds, ...projectData } = data;
       const ids = resolveGoalIds({ goalIds: inputGoalIds, goalId: projectData.goalId });
       const existingProject = await db
@@ -1022,6 +1060,7 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
         updates.goalId = ids.length > 0 ? ids[0] : null;
       }
 
+<<<<<<< upstream+partial-joe
       const row = await db.transaction(async (tx) => {
         if (updates.visibility !== undefined) {
           await notifyStatusCardIssueChange(tx, existingProject.companyId);
@@ -1048,7 +1087,24 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
         }
         return updated ?? null;
       });
+      if (!row) throw conflict("Use the dedicated policy endpoint to change a coordinated project's lead or scope");
+======= JOE-UNAPPLIED-EDITS (base context then joe lines)
+--- base ctx:
+      const row = await db
+        .update(projects)
+        .set(updates)
+        .where(eq(projects.id, id))
+        .returning()
+        .then((rows) => rows[0] ?? null);
       if (!row) return null;
++++ joe:
+        .where(and(
+          eq(projects.id, id),
+          // Atomic with policy CAS: once board-owned, generic calls cannot change its role/scope.
+          ...(projectData.leadAgentId !== undefined || projectData.companyId !== undefined || projectData.id !== undefined
+            ? [eq(projects.coordinationPolicyRevision, 0)] : []),
+        ))
+>>>>>>> joe
 
       if (ids !== undefined) {
         await syncGoalLinks(db, id, row.companyId, ids);
