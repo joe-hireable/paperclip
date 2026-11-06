@@ -787,8 +787,16 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
       })
       .where(eq(plugins.id, pluginId));
 
+    const worker = {
+      pluginId,
+      status: "running",
+      on: vi.fn(),
+      call: vi.fn().mockResolvedValue(undefined),
+      setProactiveCompanyScopes: vi.fn(),
+    };
     const workerManager = {
-      startWorker: vi.fn().mockResolvedValue(undefined),
+      startWorker: vi.fn().mockResolvedValue(worker),
+      getWorker: vi.fn(() => worker),
       stopAll: vi.fn().mockResolvedValue(undefined),
     };
     const toolDispatcher = {

@@ -567,6 +567,13 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  if (ctx.config.intelligentRoutingDeliveryMode !== undefined) {
+    // Empty mcp_servers CLI overrides merge with native config; they do not
+    // disable autoload. Do not mutate the profile or fall back to another engine.
+    throw Object.assign(new Error("Codex static routing is not yet qualified"), {
+      code: "intelligent_routing_runtime_static_harness_unqualified",
+    });
+  }
   const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
   if (engineSelection.engine === "acp") {
     try {

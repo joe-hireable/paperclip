@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { executionBindingSelectionSchema } from "../execution-bindings.js";
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
   ISSUE_EXECUTION_MONITOR_CLEAR_REASONS,
@@ -221,6 +222,7 @@ export const issueExecutionWorkspaceSettingsSchema = z
 
 export const issueAssigneeAdapterOverridesSchema = z
   .object({
+    executionBinding: executionBindingSelectionSchema.optional(),
     adapterConfig: z.record(z.string(), z.unknown()).optional(),
     useProjectWorkspace: z.boolean().optional(),
   })
@@ -601,6 +603,7 @@ export const updateIssueSchema = objectWithoutDefaults(
   requestDepth: issueRequestDepthInputSchema.optional(),
   assigneeAgentId: z.string().trim().min(1).optional().nullable(),
   comment: multilineTextSchema.pipe(z.string().min(1)).optional(),
+  intakeRequestId: z.string().uuid().optional(),
   onBehalfOfUserId: z.string().trim().min(1).optional().nullable(),
   reviewInteractionId: z.string().guid().optional(),
   reviewRequest: issueReviewRequestSchema.optional().nullable(),
@@ -724,6 +727,7 @@ export const issueCommentMetadataSchema = z.object({
 export type IssueCommentMetadata = z.infer<typeof issueCommentMetadataSchema>;
 
 export const addIssueCommentSchema = z.object({
+  intakeRequestId: z.string().uuid().optional(),
   body: multilineTextSchema.pipe(z.string().min(1)),
   onBehalfOfUserId: z.string().trim().min(1).optional().nullable(),
   authorType: issueCommentAuthorTypeSchema.optional(),

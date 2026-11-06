@@ -43,6 +43,7 @@ import { logger } from "../middleware/logger.js";
 import { pluginManifestValidator } from "./plugin-manifest-validator.js";
 import { pluginCapabilityValidator } from "./plugin-capability-validator.js";
 import { pluginRegistryService } from "./plugin-registry.js";
+import { deliverPluginConfig } from "./plugin-config-delivery.js";
 import type { PluginWorkerManager, WorkerStartOptions, WorkerToHostHandlers } from "./plugin-worker-manager.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
 import type { PluginJobScheduler } from "./plugin-job-scheduler.js";
@@ -2330,7 +2331,7 @@ export function pluginLoader(
         workerOptions.execArgv = ["--import", DEV_TSX_LOADER_PATH];
       }
 
-      await workerManager.startWorker(pluginId, workerOptions);
+      const worker = await workerManager.startWorker(pluginId, workerOptions);
       registered.worker = true;
 
       log.info(
@@ -2354,39 +2355,48 @@ export function pluginLoader(
       // runtime ctx.config.get(companyId) model. onConfigChanged is idempotent
       // for well-behaved plugins, so replaying an unchanged config is safe.
       //
-      // Reuses the `configRows` loaded in step 4b (which also seeded the
-      // worker's proactive company scopes before startup); no second listConfigs
-      // round-trip is needed here.
-      for (const row of configRows) {
-        try {
-          await workerManager.call(pluginId, "configChanged", {
-            config: (row.configJson ?? {}) as Record<string, unknown>,
-            companyId: row.companyId,
-          });
-        } catch (configErr) {
-          // A single-tenant worker fails closed (CROSS_TENANT_CONFIG) rather
-          // than collapse onto a second company's config — surface that at
-          // warn so the misconfiguration (multiple distinct companies
-          // configured for a single-tenant plugin) is visible, instead of
-          // being lost in the best-effort debug stream.
-          const code = (configErr as { code?: number } | null)?.code;
-          const details = {
-            pluginId,
-            pluginKey,
-            companyId: row.companyId,
-            code,
-            err: configErr instanceof Error ? configErr.message : String(configErr),
-          };
-          if (code === PLUGIN_RPC_ERROR_CODES.CROSS_TENANT_CONFIG) {
-            log.warn(
-              details,
-              "plugin-loader: startup config delivery rejected — single-tenant plugin configured for multiple companies",
-            );
-          } else {
-            log.debug(details, "plugin-loader: startup config delivery skipped for company");
-          }
-        }
+      // Read again inside the shared delivery ordering: a live save can commit
+      // while the worker starts, after the scopes were seeded in step 4b.
+      function deliverConfig() {
+        return deliverPluginConfig(
+          workerManager,
+          worker,
+          () => registry.listConfigs(pluginId),
+          (configErr, companyId) => {
+            // Preserve the SDK's single-tenant guard on startup and recovery.
+            const code = (configErr as { code?: number } | null)?.code;
+            const details = {
+              pluginId,
+              pluginKey,
+              companyId,
+              code,
+              err: configErr instanceof Error ? configErr.message : String(configErr),
+            };
+            if (code === PLUGIN_RPC_ERROR_CODES.CROSS_TENANT_CONFIG) {
+              log.warn(
+                details,
+                "plugin-loader: config delivery rejected — single-tenant plugin configured for multiple companies",
+              );
+            } else {
+              log.debug(details, "plugin-loader: config delivery skipped for company");
+            }
+          },
+        );
       }
+
+      // The handle's first ready event has already fired when startWorker
+      // resolves. Later ready events follow a worker-only restart, which does
+      // not re-enter this loader. Reload persisted configuration each time:
+      // startup options contain {}, and cached payloads could re-enable an
+      // app disabled or reconfigured since its first activation.
+      worker?.on("ready", () => {
+        if (workerManager.getWorker(pluginId) !== worker) return;
+        worker.setProactiveCompanyScopes([]);
+        void deliverConfig().catch(() => {
+          log.warn({ pluginId, pluginKey }, "plugin-loader: could not restore stored configuration after worker restart");
+        });
+      });
+      await deliverConfig();
 
       // ------------------------------------------------------------------
       // 6. Sync job declarations and register with scheduler

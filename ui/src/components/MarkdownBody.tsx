@@ -105,9 +105,11 @@ let mermaidLoaderPromise: Promise<typeof import("mermaid").default> | null = nul
 
 function MarkdownIssueLink({
   issuePathId,
+  href,
   children,
 }: {
   issuePathId: string;
+  href: string;
   children: ReactNode;
 }) {
   const { data } = useQuery({
@@ -123,7 +125,7 @@ function MarkdownIssueLink({
 
   return (
     <Link
-      to={`/issues/${identifier}`}
+      to={href.replace(/^\/issues\/[^?#]+/, `/issues/${encodeURIComponent(identifier)}`)}
       data-mention-kind="issue"
       // Boxless inline mention: the unified status glyph + a regular-weight
       // underlined link, optically centered with the body text.
@@ -843,7 +845,7 @@ function MarkdownBodyImpl({
       const issueRef = linkIssueReferences ? parseIssueReferenceFromHref(href) : null;
       if (issueRef) {
         return (
-          <MarkdownIssueLink issuePathId={issueRef.issuePathId}>
+          <MarkdownIssueLink issuePathId={issueRef.issuePathId} href={issueRef.href}>
             {linkChildren}
           </MarkdownIssueLink>
         );

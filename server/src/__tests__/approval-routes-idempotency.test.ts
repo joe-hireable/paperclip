@@ -139,6 +139,41 @@ describe("approval routes idempotent retries", () => {
     mockLogActivity.mockResolvedValue(undefined);
   });
 
+  it.each(["", "/issues"])("allows a reader's same-company approval GET %s", async (suffix) => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      payload: {},
+    });
+    const app = await createApp({
+      type: "agent", agentId: "reader-agent", companyId: "company-1",
+      keyScope: { kind: "approval_reader" }, source: "agent_key",
+      onBehalfOfUserId: "reader-owner",
+      onBehalfOfMemberships: [{ companyId: "company-1", status: "active", membershipRole: "viewer" }],
+    });
+    const response = await request(app).get(`/api/approvals/33333333-3333-4333-8333-333333333333${suffix}`);
+    expect(response.status).toBe(200);
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+    expect(mockApprovalService.approve).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "/issues"])("conceals a foreign-company approval from a reader GET %s", async (suffix) => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "33333333-3333-4333-8333-333333333333",
+      companyId: "foreign-company",
+      payload: {},
+    });
+    const app = await createApp({
+      type: "agent", agentId: "reader-agent", companyId: "company-1",
+      keyScope: { kind: "approval_reader" }, source: "agent_key",
+    });
+    const response = await request(app).get(`/api/approvals/33333333-3333-4333-8333-333333333333${suffix}`);
+    expect(response.status).toBe(404);
+    expect(mockAccessService.decide).not.toHaveBeenCalled();
+    expect(mockIssueApprovalService.listIssuesForApproval).not.toHaveBeenCalled();
+  });
+
   it("does not emit duplicate approval side effects when approve is already resolved", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",

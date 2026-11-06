@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { removeReleasedRunExecutionBindings } from "./execution-bindings.js";
 import {
   agents,
   agentConfigRevisions,
@@ -972,6 +973,9 @@ export function agentService(db: Db) {
           .for("update");
         await issueThreadInteractionService(tx as unknown as Db)
           .cancelPendingForDeletedAddressee(existing.companyId, id);
+        const agentRuns = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+          .where(eq(heartbeatRuns.agentId, id)).for("update");
+        await removeReleasedRunExecutionBindings(tx as unknown as Db, existing.companyId, agentRuns.map((run) => run.id));
         await tx.update(agents).set({ reportsTo: null }).where(eq(agents.reportsTo, id));
         await tx
           .update(issues)

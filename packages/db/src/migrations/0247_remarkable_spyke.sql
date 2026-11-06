@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "issues_coordinator_attempt_origin_uq" ON "issues" USING btree ("company_id","origin_id") WHERE "issues"."origin_kind" = 'project_coordinator_attempt';

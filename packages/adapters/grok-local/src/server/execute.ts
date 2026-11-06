@@ -44,6 +44,7 @@ import { DEFAULT_GROK_LOCAL_MODEL } from "../index.js";
 import { copyBackGrokAuth } from "./grok-auth-copyback.js";
 import { resolveManagedGrokHomeDir, stageGrokHomeForSync } from "./grok-home.js";
 import { isGrokUnknownSessionError, parseGrokJsonl } from "./parse.js";
+import { readGrokInstructions } from "./instructions.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -86,16 +87,9 @@ function renderApiAccessNote(env: Record<string, string>): string {
   ].join("\n");
 }
 
-type StageCleanup = {
-  kind: "file" | "dir";
-  path: string;
-};
-
 type StagedGrokAssets = {
   cleanup: () => Promise<void>;
   stagedSkillsCount: number;
-  stagedInstructionsPath: string | null;
-  rulesFilePath: string | null;
 };
 
 async function pathExists(candidate: string): Promise<boolean> {
@@ -104,44 +98,16 @@ async function pathExists(candidate: string): Promise<boolean> {
 
 async function stageGrokProjectAssets(input: {
   cwd: string;
-  instructionsFilePath: string;
   skillEntries: Array<{ key: string; runtimeName: string; source: string }>;
   desiredSkillNames: string[];
   onLog: AdapterExecutionContext["onLog"];
 }): Promise<StagedGrokAssets> {
-  const cleanup: StageCleanup[] = [];
+  const cleanup: string[] = [];
   const ensureCleanupDir = (candidate: string) => {
-    cleanup.push({ kind: "dir", path: candidate });
-  };
-  const ensureCleanupFile = (candidate: string) => {
-    cleanup.push({ kind: "file", path: candidate });
+    cleanup.push(candidate);
   };
 
-  let stagedInstructionsPath: string | null = null;
-  let rulesFilePath: string | null = null;
   let stagedSkillsCount = 0;
-
-  const instructionsTarget = path.join(input.cwd, "Agents.md");
-  if (input.instructionsFilePath) {
-    if (!await pathExists(instructionsTarget)) {
-      await fs.copyFile(input.instructionsFilePath, instructionsTarget);
-      ensureCleanupFile(instructionsTarget);
-      stagedInstructionsPath = instructionsTarget;
-    } else if (path.resolve(instructionsTarget) !== path.resolve(input.instructionsFilePath)) {
-      rulesFilePath = input.instructionsFilePath;
-      await input.onLog(
-        "stdout",
-        `[paperclip] Grok workspace already contains ${instructionsTarget}; using --rules @${input.instructionsFilePath} instead of overwriting it.\n`,
-      );
-    }
-  } else {
-    const canonicalAgents = path.join(input.cwd, "AGENTS.md");
-    if (!await pathExists(instructionsTarget) && await pathExists(canonicalAgents)) {
-      await fs.copyFile(canonicalAgents, instructionsTarget);
-      ensureCleanupFile(instructionsTarget);
-      stagedInstructionsPath = instructionsTarget;
-    }
-  }
 
   const desiredSet = new Set(input.desiredSkillNames);
   const selectedSkills = input.skillEntries.filter((entry) => desiredSet.has(entry.key));
@@ -174,15 +140,9 @@ async function stageGrokProjectAssets(input: {
 
   return {
     stagedSkillsCount,
-    stagedInstructionsPath,
-    rulesFilePath,
     cleanup: async () => {
       for (const entry of [...cleanup].reverse()) {
-        if (entry.kind === "file") {
-          await fs.rm(entry.path, { force: true }).catch(() => undefined);
-          continue;
-        }
-        await fs.rm(entry.path, { recursive: true, force: true }).catch(() => undefined);
+        await fs.rm(entry, { recursive: true, force: true }).catch(() => undefined);
       }
     },
   };
@@ -199,6 +159,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  const restrictedBinding = config.executionBindingMode !== undefined;
+  if (restrictedBinding) {
+    const profile = parseObject(config.env);
+    const explicitModel = asString(config.model, "");
+    if (
+      config.executionBindingMode !== "prompt_only" || executionTargetIsRemote ||
+      asStringArray(config.extraArgs).length > 0 || asStringArray(config.args).length > 0 ||
+      config.reasoningEffort !== undefined || config.effort !== undefined || config.modelReasoningEffort !== undefined ||
+      runtime.sessionId || runtime.sessionParams ||
+      typeof config.timeoutSec !== "number" || !Number.isFinite(config.timeoutSec) || config.timeoutSec <= 0 ||
+      (config.maxTurnsPerRun !== undefined && (typeof config.maxTurnsPerRun !== "number" || !Number.isSafeInteger(config.maxTurnsPerRun) || config.maxTurnsPerRun <= 0)) ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:/\[\],=+-]*$/.test(explicitModel) ||
+      ["auto", "default", "grok-build"].includes(explicitModel.toLowerCase()) ||
+      ["GROK_HOME"].some((key) => !path.isAbsolute(asString(profile[key], "")))
+    ) {
+      throw new Error("Invalid restricted grok execution binding");
+    }
+  }
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -210,11 +188,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // deny-by-default and it overrides --always-approve, so passing it broke
   // every unattended run (the first tool call died with "User cancelled the
   // execution for tool ..."). --always-approve alone is the unattended policy.
-  const permissionMode = asString(config.permissionMode, "").trim();
+  const permissionMode = restrictedBinding ? "dontAsk" : asString(config.permissionMode, "").trim();
   const reasoningEffort = asString(config.reasoningEffort, "").trim();
-  const maxTurns = asNumber(config.maxTurns, 0);
-  const alwaysApprove = asBoolean(config.alwaysApprove, true);
-  const disableWebSearch = asBoolean(config.disableWebSearch, true);
+  const maxTurns = restrictedBinding ? asNumber(config.maxTurnsPerRun, 1) : asNumber(config.maxTurns, 0);
+  const alwaysApprove = !restrictedBinding && asBoolean(config.alwaysApprove, true);
+  const disableWebSearch = restrictedBinding || asBoolean(config.disableWebSearch, true);
 
   const workspaceContext = parseObject(context.paperclipWorkspace);
   const workspaceCwd = asString(workspaceContext.cwd, "");
@@ -238,9 +216,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const grokSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredGrokSkillNames = resolveLegacyPaperclipDesiredSkillNames(config, grokSkillEntries);
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+  let rulesSource = instructionsFilePath;
+  if (!rulesSource && !await pathExists(path.join(cwd, "Agents.md"))) {
+    const canonicalAgents = path.join(cwd, "AGENTS.md");
+    if (await pathExists(canonicalAgents)) rulesSource = canonicalAgents;
+  }
+  // Grok's --rules accepts text, not an @file reference. Read once per run so
+  // concurrent agents never create, replace or remove a shared Agents.md.
+  const rules = rulesSource ? await readGrokInstructions(rulesSource) : null;
   const stagedAssets = await stageGrokProjectAssets({
     cwd,
-    instructionsFilePath,
     skillEntries: grokSkillEntries,
     desiredSkillNames: desiredGrokSkillNames,
     onLog,
@@ -309,7 +294,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     // Held before the remote block below, so the remote lane can stage this
     // same host home into the sandbox without re-resolving it.
-    const hostGrokHome = resolveManagedGrokHomeDir(process.env, agent.companyId);
+    const hostGrokHome = restrictedBinding
+      ? asString(env.GROK_HOME, "")
+      : resolveManagedGrokHomeDir(process.env, agent.companyId);
     // Subscription mode (no XAI_API_KEY): point the run at the company-scoped
     // Grok home a completed device login wrote. Leaves the API-key path below
     // (`resolveBillingType`) unchanged when the key exists.
@@ -453,11 +440,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const commandNotes = (() => {
       const notes: string[] = ["Prompt is passed to Grok via --single in headless mode."];
       if (alwaysApprove) notes.push("Added --always-approve for unattended execution.");
-      if (stagedAssets.stagedInstructionsPath) {
-        notes.push(`Staged project instructions at ${stagedAssets.stagedInstructionsPath} for native Grok discovery.`);
-      }
-      if (stagedAssets.rulesFilePath) {
-        notes.push(`Applied fallback instructions via --rules @${stagedAssets.rulesFilePath}.`);
+      if (rules !== null) {
+        notes.push(`Appended instructions from ${rulesSource} to the system prompt via --rules.`);
       }
       if (stagedAssets.stagedSkillsCount > 0) {
         notes.push(`Staged ${stagedAssets.stagedSkillsCount} Paperclip skill(s) into .claude/skills for native Grok discovery.`);
@@ -500,13 +484,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const buildArgs = (resumeSessionId: string | null) => {
       const args = ["--cwd", effectiveExecutionCwd, "--output-format", "streaming-json"];
       if (resumeSessionId) args.push("--resume", resumeSessionId);
-      if (model && model !== DEFAULT_GROK_LOCAL_MODEL) args.push("--model", model);
+      if (model && (restrictedBinding || model !== DEFAULT_GROK_LOCAL_MODEL)) args.push("--model", model);
       if (reasoningEffort) args.push("--reasoning-effort", reasoningEffort);
       if (maxTurns > 0) args.push("--max-turns", String(maxTurns));
       if (permissionMode) args.push("--permission-mode", permissionMode);
       if (alwaysApprove) args.push("--always-approve");
       if (disableWebSearch) args.push("--disable-web-search");
-      if (stagedAssets.rulesFilePath) args.push("--rules", `@${stagedAssets.rulesFilePath}`);
+      if (restrictedBinding) {
+        // Request native deny-by-default controls. This does not assert
+        // that the CLI removes every configured MCP advertisement.
+        args.push("--deny", "*", "--no-subagents", "--disallowed-tools",
+          "run_terminal_command,read_file,search_replace,list_dir,grep,kill_command_or_subagent,todo_write,get_command_or_subagent_output,spawn_subagent,scheduler_create,scheduler_delete,scheduler_list,monitor,search_tool,use_tool,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,image_gen,image_edit,image_to_video,reference_to_video,write");
+      }
+      if (rules !== null) args.push("--rules", rules);
       const extraArgs = (() => {
         const fromExtraArgs = asStringArray(config.extraArgs);
         if (fromExtraArgs.length > 0) return fromExtraArgs;
@@ -525,9 +515,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           command: resolvedCommand,
           cwd: effectiveExecutionCwd,
           commandNotes,
-          commandArgs: args.map((value, index) => (
-            index === args.length - 1 ? `<prompt ${prompt.length} chars>` : value
-          )),
+          commandArgs: args.map((value, index) => {
+            if (index === args.length - 1) return `<prompt ${prompt.length} chars>`;
+            if (index > 0 && args[index - 1] === "--rules") return `<instructions ${value.length} chars>`;
+            return value;
+          }),
           env: loggedEnv,
           prompt,
           promptMetrics,
@@ -540,6 +532,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         env,
         timeoutSec,
         graceSec,
+        cleanupOwnedProcessGroup: restrictedBinding && process.platform === "linux",
         onSpawn,
         onRuntimeProgress: ctx.onRuntimeProgress,
         onLog,
@@ -625,6 +618,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         // so we only surface costUsd for metered API-key billing.
         costUsd: billingType === "api" ? attempt.parsed.costUsd : null,
         resultJson: {
+          ...(restrictedBinding ? { requestedModel: model, servedModel: null } : {}),
           stopReason: attempt.parsed.stopReason,
           requestId: attempt.parsed.requestId,
           ...(failed ? { stderr: attempt.proc.stderr } : {}),

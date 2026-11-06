@@ -8,6 +8,26 @@ const SECRET_PAYLOAD_KEY_RE = new RegExp(SECRET_FIELD_NAME_PATTERN, "i");
 // "authorization". JWT-shaped values are still caught by the value guard below.
 const AUDIT_REASON_PAYLOAD_KEY_RE = /^authorizationReason$/;
 const AUDIT_SURFACE_PAYLOAD_KEY_RE = /^surface$/;
+// Coordinator authority digests are public SHA-256 receipts, not credentials.
+// Exempt only the exact field and lowercase hexadecimal wire format.
+function isPublicAuthorityDigest(key: string, value: unknown): boolean {
+  return (
+    key === "authorityDigest" &&
+    typeof value === "string" &&
+    value.length === 64 &&
+    /^[a-f0-9]{64}$/.test(value)
+  );
+}
+function redactJsonSecretField(
+  match: string,
+  prefix: string,
+  suffix: string,
+): string {
+  const field = /^(\\*")authorityDigest\1\s*:\s*\1([a-f0-9]{64})\1$/.exec(
+    match,
+  );
+  return field ? match : prefix + REDACTED_EVENT_VALUE + suffix;
+}
 /**
  * Cleanup counts on a connection-removal receipt (PAP-17119). Their names name
  * the thing they counted — secrets, bindings, tokens — so the key guard above
@@ -344,7 +364,7 @@ const JSON_SECRET_FIELD_TEXT_RE = new RegExp(
   "gi",
 );
 const ESCAPED_JSON_SECRET_FIELD_TEXT_RE = new RegExp(
-  String.raw`((?:\\")?${SECRET_FIELD_NAME_PATTERN}(?:\\")?\s*:\s*(?:\\"))[^\\\r\n]+((?:\\"))`,
+  String.raw`((?:\\+")?${SECRET_FIELD_NAME_PATTERN}(?:\\+")?\s*:\s*(?:\\+"))[^\\\r\n]+((?:\\+"))`,
   "gi",
 );
 const SECRET_TEXT_HINTS = [
@@ -876,7 +896,8 @@ export function sanitizeRecord(
     if (
       SECRET_PAYLOAD_KEY_RE.test(key) &&
       !AUDIT_REASON_PAYLOAD_KEY_RE.test(key) &&
-      !isAuditCountField(key, value)
+      !isAuditCountField(key, value) &&
+      !isPublicAuthorityDigest(key, value)
     ) {
       if (isSecretRefBinding(value)) {
         redacted[key] = sanitizeValue(value);
@@ -976,11 +997,8 @@ export function redactSensitiveText(input: string): string {
   if (!maybeContainsSecretText(input)) return input;
   return redactCommandText(
     redactStandaloneBearerCredentials(redactAuthorizationCredentials(input))
-      .replace(JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
-      .replace(
-        ESCAPED_JSON_SECRET_FIELD_TEXT_RE,
-        `$1${REDACTED_EVENT_VALUE}$2`,
-      ),
+      .replace(JSON_SECRET_FIELD_TEXT_RE, redactJsonSecretField)
+      .replace(ESCAPED_JSON_SECRET_FIELD_TEXT_RE, redactJsonSecretField),
     REDACTED_EVENT_VALUE,
   );
 }

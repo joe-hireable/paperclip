@@ -63,7 +63,7 @@ afterEach(() => {
 
 function renderMarkdown(
   children: string,
-  seededIssues: Array<{ identifier: string; status: string; title?: string }> = [],
+  seededIssues: Array<{ id?: string; identifier: string; status: string; title?: string }> = [],
   props: Partial<ComponentProps<typeof MarkdownBody>> = {},
 ) {
   const queryClient = new QueryClient({
@@ -75,8 +75,8 @@ function renderMarkdown(
   });
 
   for (const issue of seededIssues) {
-    queryClient.setQueryData(queryKeys.issues.detail(issue.identifier), {
-      id: issue.identifier,
+    queryClient.setQueryData(queryKeys.issues.detail(issue.id ?? issue.identifier), {
+      id: issue.id ?? issue.identifier,
       identifier: issue.identifier,
       status: issue.status,
       title: issue.title,
@@ -248,6 +248,32 @@ describe("MarkdownBody", () => {
     expect(html).toContain('data-mention-kind="issue"');
     expect(html).toContain("paperclip-markdown-issue-ref");
     expect(html).not.toContain("paperclip-mention-chip--issue");
+  });
+
+  it.each([
+    ["/issues/78fcb660-ab9d-477a-b3e8-b1b417d58115#document-coordinator-result", "#document-coordinator-result"],
+    ["/issues/78fcb660-ab9d-477a-b3e8-b1b417d58115?view=full", "?view=full"],
+    ["/PAP/issues/78fcb660-ab9d-477a-b3e8-b1b417d58115?view=full&focus=1#document-coordinator-result", "?view=full&amp;focus=1#document-coordinator-result"],
+  ])("preserves issue-link query and fragment when resolving %s", (href, suffix) => {
+    const html = renderMarkdown(`[Coordinator result](${href})`, [
+      { id: "78fcb660-ab9d-477a-b3e8-b1b417d58115", identifier: "PAP-16", status: "in_review" },
+    ]);
+
+    expect(html).toContain(`href="/issues/PAP-16${suffix}"`);
+    expect(html).toContain(">Coordinator result</a>");
+    expect(html).toContain('data-mention-kind="issue"');
+  });
+
+  it("preserves generated issue-scheme destinations without allowing explicit scheme URLs", () => {
+    const href = "issue://78fcb660-ab9d-477a-b3e8-b1b417d58115?view=full#comment-review";
+    const seeded = [{ id: "78fcb660-ab9d-477a-b3e8-b1b417d58115", identifier: "PAP-16", status: "in_review" }];
+    expect(renderMarkdown(`See ${href}`, seeded)).toContain('href="/issues/PAP-16?view=full#comment-review"');
+    expect(renderMarkdown(`[Explicit scheme](${href})`, seeded)).toContain('href=""');
+  });
+
+  it("preserves the issue-link destination before its identifier resolves", () => {
+    const href = "/issues/78fcb660-ab9d-477a-b3e8-b1b417d58115?view=full#document-coordinator-result";
+    expect(renderMarkdown(`[Coordinator result](${href})`)).toContain(`href="${href}"`);
   });
 
   it("uses concise issue aria labels until a distinct title is available", () => {

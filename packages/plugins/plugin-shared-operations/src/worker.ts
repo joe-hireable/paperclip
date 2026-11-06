@@ -1,6 +1,6 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
 import { applyCommand, DomainError, type Actor, type CompanyState } from "./domain.js";
-import { companyId, createStore, type TaskHead } from "./store.js";
+import { companyId, createStore, expectedRevision, taskId, type TaskHead } from "./store.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new DomainError("invalid_request", "A request object is required.");
@@ -36,8 +36,9 @@ export function createOperations(ctx: PluginContext) {
     taskHead: store.taskHead,
     async command(params: Record<string, unknown>, actor: Actor) {
       const id = companyId(params.companyId);
+      const revision = expectedRevision(params.expectedRevision);
       const current = await store.read(id);
-      if (params.expectedRevision !== current.revision) throw new DomainError("revision_conflict", "The company state changed. Refresh before retrying.", 409);
+      if (revision !== current.revision) throw new DomainError("revision_conflict", "The company state changed. Refresh before retrying.", 409);
       const command = object(params.command);
       let task: TaskHead | undefined;
       if (command.type === "context.snapshot" || command.type === "context.receive") {
@@ -55,7 +56,7 @@ export function createOperations(ctx: PluginContext) {
         }
       }
       const next = applyCommand(current.state, command, actor, new Date().toISOString());
-      const saved = await store.save(id, params.expectedRevision, next, task);
+      const saved = await store.save(id, revision, next, task);
       const event = next.events[next.events.length - 1];
       try {
         await ctx.activity.log({
@@ -81,7 +82,7 @@ const plugin = definePlugin({
     context = ctx;
     const operations = createOperations(ctx);
     ctx.data.register("overview", (params) => operations.read(companyId(params.companyId)));
-    ctx.data.register("task-head", (params) => operations.taskHead(companyId(params.companyId), companyId(params.taskId)));
+    ctx.data.register("task-head", (params) => operations.taskHead(companyId(params.companyId), taskId(params.taskId)));
     ctx.actions.register("command", async (params, trusted) => {
       if (!trusted.companyId || trusted.companyId !== params.companyId) throw new DomainError("company_mismatch", "The request escaped its company scope.", 403);
       const source = trusted.actor;
@@ -99,7 +100,7 @@ const plugin = definePlugin({
       const id = companyId(input.companyId);
       if (input.routeKey === "overview") return { body: await operations.read(id) };
       if (input.routeKey === "instructions") return { body: instructions((await operations.read(id)).state) };
-      if (input.routeKey === "task-head") return { body: await operations.taskHead(id, companyId(input.params.taskId)) };
+      if (input.routeKey === "task-head") return { body: await operations.taskHead(id, taskId(input.params.taskId)) };
       if (input.routeKey !== "command") return { status: 404, body: { error: "Unknown route" } };
       const params = object(input.body);
       if (params.companyId !== id) throw new DomainError("company_mismatch", "The request escaped its company scope.", 403);

@@ -64,6 +64,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   archiveFromInbox: vi.fn(),
   unarchiveFromInbox: vi.fn(),
   addComment: vi.fn(),
+  addCoordinatorIntake: vi.fn(),
   cancelComment: vi.fn(),
   upsertFeedbackVote: vi.fn(),
   uploadAttachment: vi.fn(),
@@ -341,6 +342,7 @@ vi.mock("../components/IssueChatThread", () => ({
       label: string;
       onSelect: (runId: string) => Promise<void> | void;
     }[];
+    composerAccessory?: ReactNode;
     footer?: ReactNode;
   }) => {
     mockIssueChatThreadRender(props);
@@ -364,6 +366,7 @@ vi.mock("../components/IssueChatThread", () => ({
             {action.label}
           </button>
         ))}
+        {props.composerAccessory}
         {props.footer}
       </div>
     );
@@ -391,6 +394,7 @@ vi.mock("../components/TaskChatThread", () => ({
       label: string;
       onSelect: (runId: string) => Promise<void> | void;
     }[];
+    composerAccessory?: ReactNode;
     footer?: ReactNode;
   }) => {
     mockIssueChatThreadRender(props);
@@ -424,6 +428,7 @@ vi.mock("../components/TaskChatThread", () => ({
             {action.label}
           </button>
         ))}
+        {props.composerAccessory}
         {props.footer}
       </div>
     );
@@ -1390,6 +1395,7 @@ describe("IssueDetail", () => {
     localStorage.clear();
     sessionStorage.clear();
     vi.restoreAllMocks();
+    Reflect.deleteProperty(navigator, "locks");
   });
 
   it("loads from the pending state into issue detail without changing hook order", async () => {
@@ -1930,6 +1936,20 @@ describe("IssueDetail", () => {
       );
     });
     expect(mockSetPanelVisible).not.toHaveBeenCalled();
+  });
+
+  it("blocks task start after a draft qualification clear fails to persist", async () => {
+    mockSidebarState.isMobile = true;
+    mockLocation.hash = "#document-plan";
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    mockIssuesApi.update.mockRejectedValueOnce(new Error("Clear failed"));
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><IssueDetail /></QueryClientProvider>));
+    await waitForAssertion(() => expect(mockTaskSidePanelRender).toHaveBeenCalled());
+    const props = mockTaskSidePanelRender.mock.calls.at(-1)![0] as { onUpdate: (patch: Record<string, unknown>) => Promise<unknown> | void };
+    await expect(props.onUpdate({ assigneeAdapterOverrides: null, status: "backlog" })).rejects.toThrow("Clear failed");
+    await act(async () => { props.onUpdate({ status: "todo" }); });
+    await waitForAssertion(() => expect(mockPushToast).toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining("draft execution requirements") })));
+    expect(mockIssuesApi.update).toHaveBeenCalledTimes(1);
   });
 
   it("opens a plan deep link in the shared mobile side-panel sheet", async () => {
@@ -3265,6 +3285,36 @@ describe("IssueDetail", () => {
       });
     },
   );
+
+  it("master intake retries its exact envelope and never dispatches legacy assignment or reopen", async () => {
+    Object.defineProperty(navigator, "locks", { configurable: true, value: {
+      request: (_name: string, _options: unknown, callback: () => unknown) => Promise.resolve().then(callback),
+    } });
+    mockAuthApi.getSession.mockResolvedValue({ session: { userId: "user-1" }, user: { id: "user-1" } });
+    mockIssuesApi.get.mockResolvedValue(createIssue({ originKind: "project_master_chat", projectId: "project-1", status: "done" }));
+    mockIssuesApi.addCoordinatorIntake.mockRejectedValueOnce(new Error("Response lost"));
+    await act(async () => { root.render(<QueryClientProvider client={queryClient}><IssueDetail /></QueryClientProvider>); });
+    await flushReact(); await flushReact();
+    const props = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as { masterIntake: boolean; enableReassign: boolean; onAdd: (body: string, reopen?: boolean, reassignment?: { assigneeAgentId: string; assigneeUserId: null }) => Promise<void>; onWorkModeChange?: unknown };
+    expect(props.masterIntake).toBe(true); expect(props.enableReassign).toBe(false); expect(props.onWorkModeChange).toBeUndefined();
+    const updatesBefore = mockIssuesApi.update.mock.calls.length;
+    await act(async () => { await expect(props.onAdd("Original thought", true, { assigneeAgentId: "agent-1", assigneeUserId: null })).rejects.toThrow("Response lost"); });
+    expect(mockIssuesApi.addComment).not.toHaveBeenCalled(); expect(mockIssuesApi.update.mock.calls.length).toBe(updatesBefore);
+    await waitForAssertion(() => expect(container.textContent).toContain("Original thought"));
+    const [id, input] = mockIssuesApi.addCoordinatorIntake.mock.calls.at(-1)!;
+    mockIssuesApi.addCoordinatorIntake.mockResolvedValue({ ...createIssueComment({ body: input.body }), intakeRequestId: input.requestId,
+      coordinatorIntake: createIssue({ id: "intake-1", identifier: "PAP-99", originKind: "project_coordinator_intake", originId: id,
+        originFingerprint: input.requestId, parentId: id, status: "blocked" }) });
+    await waitForAssertion(() => expect(Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Retry saving this message")?.disabled).toBe(false));
+    const retryButton = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Retry saving this message")!;
+    expect(retryButton).toBeDefined(); expect(retryButton.disabled).toBe(false);
+    await act(async () => { retryButton.click(); });
+    await waitForAssertion(() => expect(mockIssuesApi.addCoordinatorIntake).toHaveBeenCalledTimes(2));
+    await flushReact(); await flushReact();
+    expect(mockIssuesApi.addCoordinatorIntake.mock.calls.at(-1)).toEqual([id, input]);
+    expect(container.textContent).toContain("Message saved."); expect(container.textContent).toContain("blocked while agent coordination is being set up");
+    expect(container.querySelector('a[href*="PAP-99"]')).not.toBeNull();
+  });
 
   it("queues messages against a queued live run and interrupts that exact run", async () => {
     const postedComment = createDeferred<IssueComment>();

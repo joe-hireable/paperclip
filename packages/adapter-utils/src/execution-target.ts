@@ -268,6 +268,8 @@ export interface AdapterExecutionTargetProcessOptions {
   onRuntimeProgress?: RuntimeStatusSink;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
   terminalResultCleanup?: TerminalResultCleanupOptions;
+  /** Original-owner cleanup for explicitly bound Linux local runs. */
+  cleanupOwnedProcessGroup?: boolean;
   /**
    * Sandbox-only: factory from the Paperclip bridge handle that streams the
    * CLI's stdout/stderr during the run. When provided, the batched provider
@@ -818,6 +820,9 @@ export async function runAdapterExecutionTargetProcess(
   args: string[],
   options: AdapterExecutionTargetProcessOptions,
 ): Promise<RunProcessResult> {
+  if (options.cleanupOwnedProcessGroup && target?.kind === "remote") {
+    throw new Error("owned process-group cleanup requires a local target");
+  }
   if (target?.kind === "remote" && target.transport === "sandbox") {
     const runner = requireSandboxRunner(target);
     const env = sanitizeRemoteExecutionEnv(options.env);
@@ -880,6 +885,7 @@ export async function runAdapterExecutionTargetProcess(
     onLog: options.onLog,
     onSpawn: options.onSpawn,
     terminalResultCleanup: options.terminalResultCleanup,
+    cleanupOwnedProcessGroup: options.cleanupOwnedProcessGroup,
     localProcessSandbox: target?.kind === "local" || !target ? options.localProcessSandbox : null,
     remoteExecution: adapterExecutionTargetToRemoteSpec(target),
   });

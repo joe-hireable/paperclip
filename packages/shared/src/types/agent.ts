@@ -22,7 +22,9 @@ export interface AgentPermissions extends Record<string, unknown> {
   authorizationPolicy?: TrustAuthorizationPolicy;
 }
 
-export type AgentRuntimeConfig = Record<string, unknown>;
+export type AgentRuntimeConfig = Record<string, unknown> & {
+  executionBindingRequired?: boolean;
+};
 
 export type AgentInstructionsBundleMode = "managed" | "external";
 

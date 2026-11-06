@@ -21,6 +21,28 @@ describe("issue-reference", () => {
     expect(parseIssuePathIdFromPath("/issues/:id")).toBeNull();
   });
 
+  it.each([
+    ["/PAP/issues/pap-16#document-coordinator-result", "PAP-16", "#document-coordinator-result"],
+    ["/issues/78fcb660-ab9d-477a-b3e8-b1b417d58115?view=full#document-coordinator-result", "78fcb660-ab9d-477a-b3e8-b1b417d58115", "?view=full#document-coordinator-result"],
+    ["/issues/PAP-16#document-result?viewer=full", "PAP-16", "#document-result?viewer=full"],
+    ["/issues/PAP-16?next=%23document&value=%3F#comment-review", "PAP-16", "?next=%23document&value=%3F#comment-review"],
+    ["/issues/PAP-16?", "PAP-16", "?"],
+    ["/issues/PAP-16#", "PAP-16", "#"],
+  ])("keeps suffix separate from issue identity in %s", (href, issuePathId, suffix) => {
+    expect(parseIssuePathIdFromPath(href)).toBe(issuePathId);
+    expect(parseIssueReferenceFromHref(href)).toEqual({ issuePathId, href: `/issues/${issuePathId}${suffix}` });
+  });
+
+  it("preserves scheme and inline-code destinations through remark conversion", () => {
+    const suffix = "?view=full#document-coordinator-result";
+    const tree = paragraph(`See issue://PAP-16${suffix}`);
+    remarkLinkIssueReferences()(tree);
+    expect(paragraphChildren(tree).find(node => node.type === "link")?.url).toBe(`/issues/PAP-16${suffix}`);
+    const inline: TreeNode = { type: "root", children: [{ type: "paragraph", children: [{ type: "inlineCode", value: `/PAP/issues/PAP-16${suffix}` }] }] };
+    remarkLinkIssueReferences()(inline);
+    expect(paragraphChildren(inline)[0]?.url).toBe(`/issues/PAP-16${suffix}`);
+  });
+
   it("does not treat full issue URLs as internal issue paths", () => {
     expect(parseIssuePathIdFromPath("http://localhost:3100/PAP/issues/PAP-1179")).toBeNull();
     expect(parseIssuePathIdFromPath("http://remote.example.test:3103/PAPA/issues/PAPA-115#comment-850083f3-24de-43e7-a8cd-bc01f7cc9f0d")).toBeNull();

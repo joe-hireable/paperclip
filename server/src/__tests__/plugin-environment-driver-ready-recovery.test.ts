@@ -427,8 +427,16 @@ describe("listReadyPluginEnvironmentDrivers worker recovery", () => {
       mockRegistry.update.mockResolvedValue(undefined);
 
       const lifecycleManager = { markError: vi.fn().mockResolvedValue(undefined) };
+      const worker = {
+        pluginId: PLUGIN_ID,
+        status: "running",
+        on: vi.fn(),
+        call: vi.fn().mockResolvedValue(undefined),
+        setProactiveCompanyScopes: vi.fn(),
+      };
       const workerManager = {
-        startWorker: vi.fn().mockResolvedValue(undefined),
+        startWorker: vi.fn().mockResolvedValue(worker),
+        getWorker: vi.fn(() => worker),
         isRunning: vi.fn(() => true),
         stopWorker: vi.fn().mockResolvedValue(undefined),
       };

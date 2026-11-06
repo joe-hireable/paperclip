@@ -98,6 +98,15 @@ export const issues = pgTable(
     parentIdx: index("issues_company_parent_idx").on(table.companyId, table.parentId),
     projectIdx: index("issues_company_project_idx").on(table.companyId, table.projectId),
     originIdx: index("issues_company_origin_idx").on(table.companyId, table.originKind, table.originId),
+    coordinatorAttemptOriginUq: uniqueIndex("issues_coordinator_attempt_origin_uq")
+      .on(table.companyId, table.originId)
+      .where(sql`${table.originKind} = 'project_coordinator_attempt'`),
+    coordinatorIntakeOriginUq: uniqueIndex("issues_coordinator_intake_origin_uq")
+      .on(table.companyId, table.originId, table.originFingerprint)
+      .where(sql`${table.originKind} = 'project_coordinator_intake'`),
+    projectMasterOriginUq: uniqueIndex("issues_project_master_origin_uq")
+      .on(table.companyId, table.originId)
+      .where(sql`${table.originKind} = 'project_master_chat'`),
     projectWorkspaceIdx: index("issues_company_project_workspace_idx").on(table.companyId, table.projectWorkspaceId),
     executionWorkspaceIdx: index("issues_company_execution_workspace_idx").on(table.companyId, table.executionWorkspaceId),
     dueMonitorIdx: index("issues_company_monitor_due_idx").on(table.companyId, table.monitorNextCheckAt),

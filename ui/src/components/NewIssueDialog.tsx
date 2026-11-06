@@ -1,3 +1,6 @@
+import type { ExecutionBindingSelection } from "@paperclipai/shared/execution-bindings";
+import { ExecutionBindingSelector } from "./ExecutionBindingSelector";
+import { boundTaskOverrides, requiresTaskBinding } from "../lib/execution-binding-task";
 import { memo, useState, useEffect, useRef, useCallback, useMemo, type ChangeEvent, type CSSProperties, type DragEvent, type RefObject } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { AgentEnvConfig, EnvBinding, IssueWorkMode } from "@paperclipai/shared";
@@ -498,6 +501,8 @@ export function NewIssueDialog() {
   const [workMode, setWorkMode] = useState<IssueWorkMode>("standard");
   const [expanded, setExpanded] = useState(false);
   const [dialogCompanyId, setDialogCompanyId] = useState<string | null>(null);
+  const [bindingSelection, setBindingSelection] = useState<{ context: string; selection: ExecutionBindingSelection } | null>(null);
+  const [bindingInputRevision, setBindingInputRevision] = useState(0);
   const [stagedFiles, setStagedFiles] = useState<StagedIssueFile[]>([]);
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -586,6 +591,9 @@ export function NewIssueDialog() {
     () => (agents ?? []).find((agent) => agent.id === selectedAssigneeAgentId) ?? null,
     [agents, selectedAssigneeAgentId],
   );
+  const bindingRequired = requiresTaskBinding(selectedAssigneeAgent);
+  const bindingContext = JSON.stringify([effectiveCompanyId, selectedAssigneeAgentId, projectId, projectWorkspaceId, bindingInputRevision, stagedFiles.map(file => [file.file.name, file.file.size, file.file.lastModified])]);
+  const qualifiedBinding = bindingSelection?.context === bindingContext ? bindingSelection.selection : null;
   const assigneeAdapterType = selectedAssigneeAgent?.adapterType ?? null;
   const assigneePrimaryModel = isRecord(selectedAssigneeAgent?.adapterConfig)
     && typeof selectedAssigneeAgent.adapterConfig.model === "string"
@@ -593,7 +601,7 @@ export function NewIssueDialog() {
     : "";
   const effectiveAssigneeModel = assigneeModelOverride || assigneePrimaryModel;
   const supportsAssigneeOverrides = Boolean(
-    assigneeAdapterType && ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType),
+    !bindingRequired && assigneeAdapterType && ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType),
   );
   const mentionOptions = useMemo<MentionOption[]>(() => {
     return buildMarkdownMentionOptions({
@@ -744,6 +752,7 @@ export function NewIssueDialog() {
 
   const handleTitleChange = useCallback((nextTitle: string) => {
     titleRef.current = nextTitle;
+    setBindingInputRevision(value => value + 1);
     const nextTitleHasText = nextTitle.trim().length > 0;
     const nextDraftHasText = nextTitleHasText || descriptionRef.current.trim().length > 0;
     setTitleHasText((current) => current === nextTitleHasText ? current : nextTitleHasText);
@@ -753,6 +762,7 @@ export function NewIssueDialog() {
 
   const handleDescriptionChange = useCallback((nextDescription: string) => {
     descriptionRef.current = nextDescription;
+    setBindingInputRevision(value => value + 1);
     const nextDraftHasText = titleRef.current.trim().length > 0 || nextDescription.trim().length > 0;
     setDraftHasText((current) => current === nextDraftHasText ? current : nextDraftHasText);
     queueDraftSave({ description: nextDescription });
@@ -958,6 +968,8 @@ export function NewIssueDialog() {
   }, []);
 
   function reset() {
+    setBindingSelection(null);
+    setBindingInputRevision(value => value + 1);
     setIssueText("", "");
     setStatus("todo");
     setPriority("");
@@ -1021,7 +1033,9 @@ export function NewIssueDialog() {
     const currentTitle = titleRef.current.trim();
     const currentDescription = descriptionRef.current.trim();
     if (!effectiveCompanyId || !currentTitle || createIssue.isPending) return;
-    const assigneeAdapterOverrides = buildAssigneeAdapterOverrides({
+    const assigneeAdapterOverrides = bindingRequired
+      ? qualifiedBinding ? boundTaskOverrides(qualifiedBinding) : null
+      : buildAssigneeAdapterOverrides({
       adapterType: assigneeAdapterType,
       lane: assigneeModelLane,
       modelOverride: assigneeModelOverride,
@@ -1052,7 +1066,7 @@ export function NewIssueDialog() {
       stagedFiles,
       title: currentTitle,
       description: currentDescription || undefined,
-      status,
+      status: bindingRequired ? "backlog" : status,
       priority: priority || "medium",
       workMode,
       ...(selectedAssigneeAgentId ? { assigneeAgentId: selectedAssigneeAgentId } : {}),
@@ -1887,6 +1901,12 @@ export function NewIssueDialog() {
             </div>
           )}
 
+          {bindingRequired && effectiveCompanyId && selectedAssigneeAgentId && (
+            <div className="px-4 pb-2 space-y-2">
+              <ExecutionBindingSelector key={bindingContext} companyId={effectiveCompanyId} agentId={selectedAssigneeAgentId} contextKey={bindingContext} disabled={!projectId || !projectWorkspaceId || experimentalSettings?.enableManagedSandboxOnly === true} onSelect={selection => setBindingSelection(selection ? { context: bindingContext, selection } : null)} />
+              <p className="text-xs text-muted-foreground">This task will be created in backlog. Review its saved files and execution in properties before starting. Paused roles stay paused.</p>
+            </div>
+          )}
           {supportsAssigneeOverrides && (
             <div className="px-4 pb-2">
             <button

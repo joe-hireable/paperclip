@@ -15,7 +15,7 @@ import {
 } from "../utils.js";
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const { runId, agent, config, onLog, onMeta, authToken } = ctx;
+  const { runId, agent, config, context, onLog, onMeta, authToken } = ctx;
   const command = asString(config.command, "");
   if (!command) throw new Error("Process adapter missing command");
 
@@ -37,6 +37,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   env.PAPERCLIP_RUN_ID = runId;
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
+  // Task identity belongs to this invocation, including its absence on taskless runs.
+  const wakeTaskId = asString(context.taskId, "").trim() || asString(context.issueId, "").trim();
+  if (wakeTaskId) env.PAPERCLIP_TASK_ID = wakeTaskId;
+  else delete env.PAPERCLIP_TASK_ID;
   // runtimeEnv is only used to resolve the command path and log HOME below;
   // the child env is built inside runChildProcess from
   // sanitizeInheritedPaperclipEnv(process.env) + env, so a PAPERCLIP_API_KEY

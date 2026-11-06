@@ -19,6 +19,13 @@ describe("issuesApi.list", () => {
     mockApi.post.mockResolvedValue({});
   });
 
+  it("posts only the exact master body and intake request identity", async () => {
+    const result = { id: "comment-1", intakeRequestId: "request-1", coordinatorIntake: { id: "child-1" } };
+    mockApi.post.mockResolvedValue(result);
+    expect(await issuesApi.addCoordinatorIntake("master-1", { body: "Exact body", requestId: "request-1" })).toBe(result);
+    expect(mockApi.post).toHaveBeenCalledWith("/issues/master-1/comments", { body: "Exact body", intakeRequestId: "request-1" });
+  });
+
   it("passes parentId through to the company issues endpoint", async () => {
     await issuesApi.list("company-1", { parentId: "issue-parent-1", limit: 25 });
 

@@ -1,3 +1,5 @@
+import { useMasterIntake } from "../lib/use-master-intake";
+import { bindingInvalidationPatch, requalifyTaskBinding, requiresTaskBinding } from "../lib/execution-binding-task";
 import {
   memo,
   useCallback,
@@ -1284,6 +1286,7 @@ type IssueDetailChatTabProps = {
     string,
     import("../lib/company-members").CompanyUserProfile
   > | null;
+  masterIntake?: boolean;
   draftKey: string;
   reassignOptions: Array<{ id: string; label: string; searchText?: string }>;
   currentAssigneeValue: string;
@@ -1397,6 +1400,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   currentUserId,
   userLabelMap,
   userProfileMap,
+  masterIntake = false,
   draftKey,
   reassignOptions,
   currentAssigneeValue,
@@ -2348,7 +2352,8 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
           userLabelMap={userLabelMap}
           userProfileMap={userProfileMap}
           draftKey={draftKey}
-          enableReassign
+          masterIntake={masterIntake}
+          enableReassign={!masterIntake}
           reassignOptions={reassignOptions}
           currentAssigneeValue={currentAssigneeValue}
           suggestedAssigneeValue={suggestedAssigneeValue}
@@ -3723,9 +3728,29 @@ export function IssueDetail() {
     },
   });
 
+  const invalidExecutionDrafts = useRef(new Set<string>());
   const updateIssue = useMutation({
-    mutationFn: (data: Record<string, unknown>) =>
-      issuesApi.update(issueId!, data),
+    scope: { id: `issue-update:${issueId}` },
+    mutationFn: async (data: Record<string, unknown>) => {
+      if ((data.status === "todo" || data.status === "in_progress") && invalidExecutionDrafts.current.has(issueId!)) {
+        throw new Error("Qualify and save the draft execution requirements before starting this task.");
+      }
+      const current = await issuesApi.get(issueId!);
+      const patch = bindingInvalidationPatch(current, data);
+      const next = { ...current, ...patch } as Issue;
+      if (current.assigneeAdapterOverrides?.executionBinding && hasLiveRuns && (patch.assigneeAdapterOverrides !== undefined || ["assigneeAgentId", "projectId", "projectWorkspaceId", "title", "description"].some(key => Object.hasOwn(patch, key)))) {
+        throw new Error("Finish or cancel the active bound run before changing its inputs or execution.");
+      }
+      if (Object.hasOwn(patch, "assigneeAgentId") && next.assigneeAgentId && !next.assigneeAdapterOverrides?.executionBinding) {
+        const role = await agentsApi.get(next.assigneeAgentId, current.companyId);
+        if (requiresTaskBinding(role)) patch.status = "backlog";
+      }
+      if (patch.status === "todo" || patch.status === "in_progress") {
+        const role = next.assigneeAgentId ? await agentsApi.get(next.assigneeAgentId, current.companyId) : null;
+        await requalifyTaskBinding(next, role);
+      }
+      return issuesApi.update(issueId!, patch);
+    },
     onMutate: async (data) => {
       await queryClient.cancelQueries({
         queryKey: queryKeys.issues.detail(issueId!),
@@ -4103,9 +4128,18 @@ export function IssueDetail() {
   });
   const handleIssuePropertiesUpdate = useCallback(
     (data: Record<string, unknown>) => {
+      // Qualification clear/save must finish in order before another preview can succeed.
+      if ("assigneeAdapterOverrides" in data && data.status === "backlog") {
+        const taskId = issueId!;
+        invalidExecutionDrafts.current.add(taskId);
+        return updateIssue.mutateAsync(data).then(result => {
+          if (data.assigneeAdapterOverrides) invalidExecutionDrafts.current.delete(taskId);
+          return result;
+        });
+      }
       updateIssue.mutate(data);
     },
-    [updateIssue.mutate],
+    [issueId, updateIssue.mutate, updateIssue.mutateAsync],
   );
 
   const updateChildIssue = useMutation({
@@ -4259,6 +4293,11 @@ export function IssueDetail() {
       setPendingApprovalAction(null);
     },
   });
+
+  const isProjectMaster = issue?.originKind === "project_master_chat";
+  const masterIntake = useMasterIntake(isProjectMaster && issue && currentUserId
+    ? { companyId: issue.companyId, masterIssueId: issue.id, authorUserId: currentUserId }
+    : null);
 
   const addComment = useMutation({
     mutationFn: ({
@@ -5068,9 +5107,17 @@ export function IssueDetail() {
     },
   });
 
+  async function invalidateBindingForFileChange() {
+    const current = await issuesApi.get(issueId!);
+    if (current.assigneeAdapterOverrides?.executionBinding) {
+      await updateIssue.mutateAsync({ assigneeAdapterOverrides: null, status: "backlog" });
+    }
+  }
+
   const uploadAttachment = useMutation({
     mutationFn: async (file: File) => {
       if (!selectedCompanyId) throw new Error("No organization selected");
+      await invalidateBindingForFileChange();
       return issuesApi.uploadAttachment(selectedCompanyId, issueId!, file);
     },
     onSuccess: () => {
@@ -5094,6 +5141,7 @@ export function IssueDetail() {
       const body = await file.text();
       const inferredTitle = titleizeFilename(baseName);
       const nextTitle = existing?.title ?? inferredTitle ?? null;
+      await invalidateBindingForFileChange();
       return issuesApi.upsertDocument(issueId!, key, {
         title: key === "plan" ? null : nextTitle,
         format: "markdown",
@@ -5116,8 +5164,10 @@ export function IssueDetail() {
   });
 
   const deleteAttachment = useMutation({
-    mutationFn: (attachmentId: string) =>
-      issuesApi.deleteAttachment(attachmentId),
+    mutationFn: async (attachmentId: string) => {
+      await invalidateBindingForFileChange();
+      return issuesApi.deleteAttachment(attachmentId);
+    },
     onSuccess: () => {
       setAttachmentError(null);
       queryClient.invalidateQueries({
@@ -5983,13 +6033,17 @@ export function IssueDetail() {
       reopen?: boolean,
       reassignment?: CommentReassignment,
     ) => {
+      if (isProjectMaster) {
+        await masterIntake.send(body);
+        return;
+      }
       if (reassignment) {
         await addCommentAndReassign.mutateAsync({ body, reopen, reassignment });
         return;
       }
       await addComment.mutateAsync({ body, reopen });
     },
-    [addComment, addCommentAndReassign],
+    [addComment, addCommentAndReassign, isProjectMaster, masterIntake],
   );
   const handleCommentImageUpload = useCallback(
     async (file: File) => {
@@ -6119,6 +6173,8 @@ export function IssueDetail() {
   const resumeAssigneeAgent = useMutation({
     mutationFn: async () => {
       if (!issueAssigneeAgentIdForResume) throw new Error("No assignee agent");
+      const role = await agentsApi.get(issueAssigneeAgentIdForResume, issueCompanyIdForResume ?? undefined);
+      if (requiresTaskBinding(role)) throw new Error("This role requires qualified task execution. Resume the role explicitly from its controls, then start the reviewed task from backlog.");
       await agentsApi.resume(
         issueAssigneeAgentIdForResume,
         issueCompanyIdForResume ?? undefined,
@@ -7641,6 +7697,8 @@ export function IssueDetail() {
           >
             {resolvedDetailTab === "chat" ? (
               <IssueDetailChatTab
+                key={isProjectMaster ? JSON.stringify([currentUserId, issue.companyId, issue.id]) : undefined}
+                masterIntake={isProjectMaster}
                 threadHeader={taskChatThreadHeader}
                 issueBrief={
                   // Suppress the seeded-description bubble for the onboarding first
@@ -7680,7 +7738,7 @@ export function IssueDetail() {
                 companyId={issue.companyId}
                 projectId={issue.projectId ?? null}
                 issueStatus={issue.status}
-                issueAssigneeAgentId={issue.assigneeAgentId}
+                issueAssigneeAgentId={isProjectMaster ? null : issue.assigneeAgentId}
                 issueWorkMode={issue.workMode ?? "standard"}
                 executionRunId={issue.executionRunId ?? null}
                 blockedBy={issue.blockedBy ?? []}
@@ -7727,7 +7785,19 @@ export function IssueDetail() {
                 onRefreshLatestComments={refetchLatestComments}
                 composerRef={commentComposerRef}
                 composerAccessory={
-                  hasVisibleMonitorSurface(issue) ? (
+                  isProjectMaster ? (
+                    <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3 text-sm" data-testid="master-intake-notice">
+                      <p>Messages are saved here. Agent coordination is still being set up.</p>
+                      {masterIntake.error ? <p role="alert">{masterIntake.error}</p> : null}
+                      {masterIntake.pending ? <>
+                        <p>{masterIntake.busy ? "Saving or checking this message…" : "Saving has not been confirmed. This original message is kept for recovery."}</p>
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap font-sans">{masterIntake.pending.body}</pre>
+                        <Button size="sm" variant="outline" disabled={masterIntake.busy} onClick={() => void masterIntake.retry()}>Retry saving this message</Button>
+                        <Button size="sm" variant="ghost" disabled={masterIntake.busy} onClick={() => void masterIntake.checkSaved()}>Check saved receipt</Button>
+                      </> : null}
+                      {masterIntake.receipt ? <p>Message saved. <Link to={createIssueDetailPath(masterIntake.receipt.identifier ?? masterIntake.receipt.id)}>Intake {masterIntake.receipt.identifier ?? masterIntake.receipt.id}</Link> is {masterIntake.receipt.status === "cancelled" ? "cancelled" : "blocked while agent coordination is being set up"}.</p> : null}
+                    </div>
+                  ) : hasVisibleMonitorSurface(issue) ? (
                     <IssueMonitorComposerStrip
                       issue={issue}
                       onCheckNow={() => checkIssueMonitorNow.mutate()}
@@ -7750,12 +7820,12 @@ export function IssueDetail() {
                 currentUserId={currentUserId}
                 userLabelMap={userLabelMap}
                 userProfileMap={userProfileMap}
-                draftKey={`paperclip:issue-comment-draft:${issue.id}`}
+                draftKey={isProjectMaster ? `paperclip:master-draft:${JSON.stringify([currentUserId, issue.companyId, issue.id])}` : `paperclip:issue-comment-draft:${issue.id}`}
                 reassignOptions={commentReassignOptions}
                 currentAssigneeValue={actualAssigneeValue}
                 suggestedAssigneeValue={suggestedAssigneeValue}
                 mentions={mentionOptions}
-                composerDisabledReason={null}
+                composerDisabledReason={isProjectMaster ? (!currentUserId ? "Sign in to save a project message." : masterIntake.pending ? "Resolve the pending message before sending another one." : null) : null}
                 composerHint={composerHint}
                 queuedCommentReason={queuedCommentReason}
                 onVote={handleCommentVote}
@@ -7775,7 +7845,7 @@ export function IssueDetail() {
                     : undefined
                 }
                 runFinalizationActions={runFinalizationActions}
-                onWorkModeChange={(nextMode) => {
+                onWorkModeChange={isProjectMaster ? undefined : (nextMode) => {
                   const currentMode: IssueWorkMode =
                     issue.workMode ?? "standard";
                   if (currentMode === nextMode) return;
@@ -8158,7 +8228,7 @@ export function IssueDetail() {
                       : undefined
                   }
                   onAddSubIssue={openNewSubIssue}
-                  onUpdate={(data) => updateIssue.mutate(data)}
+                  onUpdate={handleIssuePropertiesUpdate}
                   inline
                   hasActiveRun={resolvedHasActiveRun}
                   externalObjects={
@@ -8214,7 +8284,7 @@ export function IssueDetail() {
                           : undefined
                       }
                       onAddSubIssue={openNewSubIssue}
-                      onUpdate={(data) => updateIssue.mutate(data)}
+                      onUpdate={handleIssuePropertiesUpdate}
                       inline
                       hasActiveRun={resolvedHasActiveRun}
                       externalObjects={

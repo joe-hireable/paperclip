@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import type { ComponentProps, ReactNode } from "react";
+import { act as reactAct, useState, type ComponentProps, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type {
@@ -16,6 +16,9 @@ import type { Issue, IssueDocument } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IssueProperties } from "./IssueProperties";
 import { queryKeys } from "../lib/queryKeys";
+
+const mockBindingsApi = vi.hoisted(() => ({ list: vi.fn(), preview: vi.fn() }));
+vi.mock("../api/execution-bindings", () => ({ executionBindingsApi: mockBindingsApi }));
 
 const mockAgentsApi = vi.hoisted(() => ({
   list: vi.fn(),
@@ -507,6 +510,40 @@ describe("IssueProperties", () => {
       enableTaskWatchdogs: false,
       enableStreamlinedUi: true,
     });
+  });
+
+  it("clears saved qualification on requirement edits and preserves the draft through requalification", async () => {
+    const selection = { bindingId: "binding-1", model: "exact-model", dataClass: "synthetic" as const, requiredCapabilities: ["text"], reason: "Fixture", evidenceRefs: ["fixture-spec"] };
+    mockAgentsApi.list.mockResolvedValue([{ id: "agent-1", name: "Qualified role", status: "paused", adapterType: "codex_local", runtimeConfig: { executionBindingRequired: true } }]);
+    mockBindingsApi.list.mockResolvedValue([{ id: selection.bindingId, name: "Reviewed", accountKey: "account", adapterType: "codex_local", models: [selection.model], enabled: true, allowedAgentIds: ["agent-1"], capabilities: ["text"], evidenceRefs: ["route-evidence"], verifiedUntil: "2099-01-01" }]);
+    mockBindingsApi.preview.mockResolvedValue({ status: "no_selection", candidates: [{ bindingId: selection.bindingId, exclusions: ["data_class_denied"] }] });
+    let saved = createIssue({ assigneeAgentId: "agent-1", projectId: "project-1", projectWorkspaceId: "workspace-main", status: "todo", assigneeAdapterOverrides: { executionBinding: selection, useProjectWorkspace: true } });
+    const updates = vi.fn(async (patch: Record<string, unknown>) => { saved = { ...saved, ...patch } as Issue; });
+    function SavedProperties() {
+      const [issue, setIssue] = useState(saved);
+      return <IssueProperties issue={issue} childIssues={[]} inline onUpdate={async patch => { await updates(patch); setIssue(saved); }} />;
+    }
+    const root = createRoot(container);
+    await reactAct(async () => { root.render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><SavedProperties /></QueryClientProvider>); });
+    await reactAct(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+    try {
+      const classification = () => container.querySelector<HTMLSelectElement>('[aria-label="Task data class"]')!;
+      await reactAct(async () => { classification().value = "private"; classification().dispatchEvent(new Event("change", { bubbles: true })); });
+      expect(saved.assigneeAdapterOverrides).toBeNull();
+      expect(saved.status).toBe("backlog");
+      expect(classification().value).toBe("private");
+      const qualify = () => Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Qualify selection")!;
+      await reactAct(async () => qualify().click());
+      expect(saved.assigneeAdapterOverrides).toBeNull();
+      expect(container.textContent).toContain("data class denied");
+      expect(classification().value).toBe("private");
+      mockBindingsApi.preview.mockResolvedValue({ status: "selected", selection: { ...selection, dataClass: "private" } });
+      await reactAct(async () => qualify().click());
+      expect(saved.assigneeAdapterOverrides?.executionBinding?.dataClass).toBe("private");
+      expect(saved.status).toBe("backlog");
+      expect(classification().value).toBe("private");
+      expect(container.textContent).toContain("Qualified. Account capacity is not reserved");
+    } finally { await reactAct(async () => root.unmount()); }
   });
 
   afterEach(() => {

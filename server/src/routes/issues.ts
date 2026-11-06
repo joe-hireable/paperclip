@@ -1,3 +1,5 @@
+import { startCoordinatorAttemptSchema, coordinatorResultSchema, prepareCoordinatorAttemptSchema, projectCoordinatorAttemptService } from "../services/project-coordinator-attempts.js";
+import { projectCoordinatorIntakeService } from "../services/project-coordinator-intake.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
@@ -2987,6 +2989,21 @@ export function issueRoutes(
     const { executeIssuePostCommitActions } = await import("../services/issues.js");
     await executeIssuePostCommitActions(db, actions);
   };
+
+  async function acceptCoordinatorIntake(req: Request, issue: Awaited<ReturnType<typeof svc.getById>>, body: string, patch: boolean) {
+    if (!issue || issue.originKind !== "project_master_chat") return null;
+    const allowed = new Set(patch ? ["comment", "intakeRequestId"] : ["body", "intakeRequestId"]);
+    if (req.actor.type !== "board") throw forbidden("Only board input can create coordinator intake");
+    if (Object.keys(req.body).some(key => !allowed.has(key) &&
+      !(["reopen", "resume", "interrupt"].includes(key) && req.body[key] === false) &&
+      !(key === "authorType" && req.body[key] === "user"))) {
+      throw unprocessable("Post coordinator intake separately from issue changes or structured metadata");
+    }
+    const accepted = await projectCoordinatorIntakeService(db).addComment({ masterId: issue.id, body, requestId: req.body.intakeRequestId, actor: req.actor, sourceTrust: await sourceTrustForActorWrite(issue, getActorInfo(req)) });
+    const { projectCoordinatorProgressionService } = await import("../services/project-coordinator-progression.js");
+    await projectCoordinatorProgressionService(db, heartbeat.wakeup).advance(accepted.intake.id);
+    return accepted;
+  }
 
   const memoizeIssueRead = createRequestPromiseMemo<Request, Awaited<ReturnType<typeof svc.getById>>>({
     shouldCache: (issue) => issue !== null,
@@ -7209,6 +7226,23 @@ export function issueRoutes(
     const issue = await getAccessibleResource(req, res, getIssueById(req, id), "Issue not found");
     if (!issue) return;
     if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    const view = req.query.view;
+    if (view !== undefined && view !== "execution-authority") {
+      res.status(400).json({ error: "Invalid issue view" });
+      return;
+    }
+    if (view === "execution-authority") {
+      res.json({
+        id: issue.id,
+        companyId: issue.companyId,
+        projectId: issue.projectId,
+        assigneeAgentId: issue.assigneeAgentId,
+        status: issue.status,
+        description: issue.description,
+        assigneeAdapterOverrides: issue.assigneeAdapterOverrides,
+      });
+      return;
+    }
     const inboxArchiveFieldsPromise = req.actor.type === "board" && req.actor.userId
       ? svc.getActiveInboxArchiveFields(issue, req.actor.userId)
       : Promise.resolve({});
@@ -7669,6 +7703,31 @@ export function issueRoutes(
       },
       recoveryAction: result.recoveryAction,
     });
+  });
+
+  router.post("/issues/:id/coordinator-attempt", validate(prepareCoordinatorAttemptSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(String(req.params.id)), "Issue not found");
+    if (!issue) return;
+    res.json(await projectCoordinatorAttemptService(db).prepare(issue.id, req.actor, req.body));
+  });
+  router.post("/issues/:id/coordinator-start", validate(startCoordinatorAttemptSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(String(req.params.id)), "Issue not found");
+    if (!issue) return;
+    const result = await projectCoordinatorAttemptService(db).admit(issue.id, req.actor, req.body);
+    if (result.enqueue && result.agentId) await heartbeat.wakeup(result.agentId, {
+      source: "on_demand", triggerDetail: "manual", reason: "project_coordinator_admitted",
+      requestedByActorType: "user", requestedByActorId: req.actor.userId,
+      contextSnapshot: {issueId:issue.id}, idempotencyKey: `coordinator:${issue.id}`,
+    });
+    res.json(result);
+  });
+  router.get("/issues/:id/coordinator-context", async (req, res) => {
+    res.json(await projectCoordinatorAttemptService(db).taskEnvelope(String(req.params.id), req.actor));
+  });
+  router.put("/issues/:id/coordinator-result", validate(coordinatorResultSchema), async (req, res) => {
+    res.json(await projectCoordinatorAttemptService(db).taskEnvelope(String(req.params.id), req.actor, req.body.body, req.body.handoff));
   });
 
   router.get("/issues/:id/work-products", async (req, res) => {
@@ -9973,6 +10032,11 @@ export function issueRoutes(
       { allowVisibleIssueWrite: true },
     );
     if (!issueMutationAccess) return;
+    if (existing.originKind === "project_master_chat" && req.body.comment) {
+      const intake = await acceptCoordinatorIntake(req, existing, req.body.comment, true);
+      res.json({ ...existing, comment: intake!.comment, coordinatorIntake: intake!.intake, intakeRequestId: intake!.requestId, changes: {} });
+      return;
+    }
     const issueMutationAuthorizationReason = req.actor.type === "agent"
       ? issueWriteAuthorizationReason(req, await decideIssueAccess(req, existing, "issue:mutate"))
       : issueWriteAuthorizationReason(req, true);
@@ -9992,6 +10056,7 @@ export function issueRoutes(
         : null;
     const {
       comment: commentBody,
+      intakeRequestId: _intakeRequestId,
       reviewInteractionId: requestedReviewInteractionId,
       reviewRequest,
       reopen: reopenRequested,
@@ -13279,6 +13344,11 @@ export function issueRoutes(
     }
     const commentAccessDecision = await assertAgentIssueCommentAllowed(req, res, issue);
     if (!commentAccessDecision) return;
+    if (issue.originKind === "project_master_chat") {
+      const intake = await acceptCoordinatorIntake(req, issue, req.body.body, false);
+      res.status(201).json({ ...intake!.comment, coordinatorIntake: intake!.intake, intakeRequestId: intake!.requestId });
+      return;
+    }
     const commentAuthorizationReason = issueWriteAuthorizationReason(req, commentAccessDecision);
     if (!assertStructuredCommentFieldsAllowed(req, res, {
       presentation: req.body.presentation,

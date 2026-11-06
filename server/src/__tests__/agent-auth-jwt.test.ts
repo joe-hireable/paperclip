@@ -79,6 +79,33 @@ describe("agent local JWT", () => {
     expect(claims?.key_scope).toEqual({ kind: "skill_test", issueId });
   });
 
+  it.each([
+    null,
+    "standard",
+    [],
+    {},
+    { kind: "unknown" },
+    { kind: "skill_test" },
+    { kind: "task_bridge", projectId: "invalid" },
+    { kind: "standard", issueId: "11111111-1111-4111-8111-111111111111" },
+  ].map((keyScope) => ({ keyScope })))("rejects an explicitly malformed signed scope $keyScope", ({ keyScope }) => {
+    const token = craftLegacyMasterSecretToken(process.env[secretEnv]!, "company-1", {
+      key_scope: keyScope,
+    });
+    expect(verifyLocalAgentJwt(token)).toBeNull();
+  });
+
+  it.each([
+    { kind: "standard" },
+    { kind: "skill_test", issueId: "11111111-1111-4111-8111-111111111111" },
+    { kind: "task_bridge", projectId: "11111111-1111-4111-8111-111111111111" },
+  ])("preserves a valid explicit signed scope %j", (keyScope) => {
+    const token = craftLegacyMasterSecretToken(process.env[secretEnv]!, "company-1", {
+      key_scope: keyScope,
+    });
+    expect(verifyLocalAgentJwt(token)?.key_scope).toEqual(keyScope);
+  });
+
   it("returns null when secret is missing", () => {
     process.env[secretEnv] = "";
     const token = createLocalAgentJwt("agent-1", "company-1", "claude_local", "run-1");
@@ -267,7 +294,11 @@ describe("agent local JWT", () => {
   });
 
   // Helper: hand-craft a token signed with the raw master secret (legacy path).
-  function craftLegacyMasterSecretToken(masterSecret: string, companyId: string) {
+  function craftLegacyMasterSecretToken(
+    masterSecret: string,
+    companyId: string,
+    overrides: Record<string, unknown> = {},
+  ) {
     const now = Math.floor(Date.now() / 1000);
     const header = { alg: "HS256", typ: "JWT" };
     const claims = {
@@ -277,6 +308,7 @@ describe("agent local JWT", () => {
       run_id: "run-legacy",
       iat: now,
       exp: now + 3600,
+      ...overrides,
       iss: "paperclip",
       aud: "paperclip-api",
     };

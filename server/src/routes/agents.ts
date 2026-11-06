@@ -77,6 +77,7 @@ import {
 } from "./workspace-command-authz.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { environmentService } from "../services/environments.js";
+import { executionBindingService } from "../services/execution-bindings.js";
 import { resolveEnvironmentExecutionTarget } from "../services/environment-execution-target.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import { resolvePluginSandboxProviderDriverByKey } from "../services/plugin-environment-driver.js";
@@ -483,6 +484,14 @@ export function agentRoutes(
 
   const router = Router();
   const svc = agentService(db);
+  const executionBindingsSvc = executionBindingService(db);
+  async function assertUnboundAdapterAllowed(type: string) {
+    if (await executionBindingsSvc.isRegisteredHarness(type)) {
+      throw conflict("This harness requires a qualified task execution binding", {
+        code: "execution_binding_required",
+      });
+    }
+  }
   const access = accessService(db);
   const approvalsSvc = approvalService(db);
   const budgets = budgetService(db);
@@ -2947,6 +2956,12 @@ export function agentRoutes(
       res.status(404).json({ error: "Environment not found" });
       return;
     }
+    if (await executionBindingsSvc.isRegisteredHarness(type)) {
+      if (refresh) await assertUnboundAdapterAllowed(type);
+      res.setHeader("X-Paperclip-Model-Source", "qualified-bindings");
+      res.json(await executionBindingsSvc.listQualifiedModels(companyId, type));
+      return;
+    }
     if (type === "opencode_local" && environment && environment.driver !== "local") {
       const adapter = requireServerAdapter(type);
       res.json(adapter.models ?? []);
@@ -2963,6 +2978,11 @@ export function agentRoutes(
     assertCompanyAccess(req, companyId);
     const type = assertKnownAdapterType(req.params.type as string);
 
+    if (await executionBindingsSvc.isRegisteredHarness(type)) {
+      res.setHeader("X-Paperclip-Model-Source", "qualified-bindings");
+      res.json(null);
+      return;
+    }
     const detected = await detectAdapterModel(type);
     res.json(detected);
   });
@@ -3021,6 +3041,7 @@ export function agentRoutes(
       if (requestedEnvironmentId) {
         await assertAdapterTestEnvironmentForCompany(companyId, requestedEnvironmentId);
       }
+      await assertUnboundAdapterAllowed(type);
       const normalizedAdapterConfig = await secretsSvc.normalizeAdapterConfigForPersistence(
         companyId,
         inputAdapterConfig,
@@ -3128,6 +3149,7 @@ export function agentRoutes(
           return;
         }
 
+        await assertUnboundAdapterAllowed(type);
         const result = await adapter.testEnvironment({
           companyId,
           adapterType: type,

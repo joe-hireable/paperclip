@@ -1667,6 +1667,62 @@
       "when": 1788557575279,
       "tag": "0239_sturdy_santa_claus",
       "breakpoints": true
+    },
+    {
+      "idx": 240,
+      "version": "7",
+      "when": 1788786353803,
+      "tag": "0240_gigantic_tattoo",
+      "breakpoints": true
+    },
+    {
+      "idx": 241,
+      "version": "7",
+      "when": 1788788461510,
+      "tag": "0241_hesitant_blur",
+      "breakpoints": true
+    },
+    {
+      "idx": 242,
+      "version": "7",
+      "when": 1788805344398,
+      "tag": "0242_mysterious_squadron_sinister",
+      "breakpoints": true
+    },
+    {
+      "idx": 243,
+      "version": "7",
+      "when": 1789044525255,
+      "tag": "0243_complex_sunfire",
+      "breakpoints": true
+    },
+    {
+      "idx": 244,
+      "version": "7",
+      "when": 1789060735074,
+      "tag": "0244_equal_wrecking_crew",
+      "breakpoints": true
+    },
+    {
+      "idx": 245,
+      "version": "7",
+      "when": 1789063457776,
+      "tag": "0245_parallel_norrin_radd",
+      "breakpoints": true
+    },
+    {
+      "idx": 246,
+      "version": "7",
+      "when": 1789065570932,
+      "tag": "0246_graceful_doorman",
+      "breakpoints": true
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "when": 1789072785621,
+      "tag": "0247_remarkable_spyke",
+      "breakpoints": true
     }
   ]
 }

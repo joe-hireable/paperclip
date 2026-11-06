@@ -474,6 +474,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     onAttachImage,
     imageUploadHandler,
     mentions,
+    masterIntake = false,
     enableReassign,
     reassignOptions,
     currentAssigneeValue,
@@ -2588,12 +2589,13 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                 <TaskChatComposer
                   onAdd={handleThreadAdd}
                   workMode={issueWorkMode}
-                  onWorkModeChange={onWorkModeChange}
+                  onWorkModeChange={masterIntake ? undefined : onWorkModeChange}
                   disabled={Boolean(runtimeComposerDisabledReason)}
                   disabledReason={runtimeComposerDisabledReason}
                   onAttachImage={onAttachImage}
                   onImageUpload={imageUploadHandler}
                   mentions={mentions}
+                  masterIntake={masterIntake}
                   enableReassign={enableReassign}
                   reassignOptions={reassignOptions}
                   agentMap={agentMap}

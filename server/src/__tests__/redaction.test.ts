@@ -698,3 +698,102 @@ second-line\" status=401`,
     });
   });
 });
+
+describe("public coordinator authority digest", () => {
+  const digest = "0123456789abcdef".repeat(4);
+  it("preserves the exact public digest in coordinator.prepared and helper context", () => {
+    const payload = { authorityDigest: digest, selectedFileCount: 4 };
+    expect(redactEventPayload(payload)).toEqual(payload);
+    expect(sanitizeRecord({ context: payload })).toEqual({ context: payload });
+  });
+
+  it.each([0, 1, 2])(
+    "preserves helper JSON through %i escaped string layers",
+    (layers) => {
+      let wire = JSON.stringify({
+        context: { authorityDigest: digest, maxTurns: 6 },
+        accessToken: "private-token",
+      });
+      let expected = JSON.stringify({
+        context: { authorityDigest: digest, maxTurns: 6 },
+        accessToken: REDACTED_EVENT_VALUE,
+      });
+      for (let i = 0; i < layers; i += 1) {
+        wire = JSON.stringify(wire);
+        expected = JSON.stringify(expected);
+      }
+      expect(redactSensitiveText(wire)).toBe(expected);
+      expect(redactSensitiveText(redactSensitiveText(wire))).toBe(expected);
+    },
+  );
+
+  it.each([
+    "a".repeat(63),
+    "a".repeat(65),
+    "A".repeat(64),
+    "aaa.bbb.ccc",
+    "secret-value",
+    digest + "\n",
+    " " + digest,
+    digest + " ",
+    42,
+    null,
+    { value: digest },
+  ])("redacts malformed digest %j", (value) => {
+    expect(sanitizeRecord({ authorityDigest: value }).authorityDigest).toBe(
+      REDACTED_EVENT_VALUE,
+    );
+    if (typeof value === "string") {
+      for (let layers = 0; layers < 3; layers += 1) {
+        let wire = JSON.stringify({ authorityDigest: value });
+        for (let i = 0; i < layers; i += 1) wire = JSON.stringify(wire);
+        expect(redactSensitiveText(wire)).not.toContain(value);
+      }
+    }
+  });
+
+  it.each([
+    "authority",
+    "AuthorityDigest",
+    "authorityDigestToken",
+    "my_authorityDigest",
+    "authorization",
+    "apiKey",
+    "jwt",
+  ])("does not exempt credential key %s", (key) => {
+    expect(sanitizeRecord({ [key]: digest })[key]).toBe(REDACTED_EVENT_VALUE);
+    for (let layers = 0; layers < 3; layers += 1) {
+      let wire = JSON.stringify({ [key]: digest });
+      for (let i = 0; i < layers; i += 1) wire = JSON.stringify(wire);
+      expect(redactSensitiveText(wire)).not.toContain(digest);
+    }
+  });
+  it("retains the public digest in the observed native tool_result wire", () => {
+    // Observed native tool_result shape, with synthetic IDs and a fixture digest;
+    // the recorded field was already redacted, so no provider bytes are invented.
+    const event = {
+      type: "user",
+      message: {
+        content: [
+          {
+            tool_use_id: "toolu_fixture_context",
+            type: "tool_result",
+            content:
+              '{"context":{"companyId":"00000000-0000-4000-8000-000000000001","projectId":"00000000-0000-4000-8000-000000000001","attemptIssueId":"00000000-0000-4000-8000-000000000001","authorityDigest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","maxTurns":6}}',
+            is_error: false,
+          },
+        ],
+      },
+    };
+    const wire = JSON.stringify({
+      stream: "stdout",
+      chunk: JSON.stringify(event) + "\n",
+    });
+    const redacted = JSON.parse(redactSensitiveText(wire)) as { chunk: string };
+    const output = JSON.parse(redacted.chunk) as typeof event;
+    expect(
+      JSON.parse(output.message.content[0]!.content).context.authorityDigest,
+    ).toBe("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    expect(output).toEqual(event);
+  });
+});

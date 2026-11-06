@@ -1,5 +1,6 @@
 import type {
   Project,
+  ProjectConversation,
   ProjectWorkspace,
   WorkspaceOperation,
   WorkspaceRuntimeControlTarget,
@@ -25,6 +26,10 @@ export const projectsApi = {
     return api.get<Project[]>("/companies/" + encodeURIComponent(companyId) + "/projects" + (query ? "?" + query : ""));
   },
   get: (id: string, companyId?: string) => api.get<Project>(projectPath(id, companyId)),
+  getConversation: (projectId: string, companyId: string) =>
+    api.get<ProjectConversation>(projectPath(projectId, companyId, "/conversation")),
+  createConversation: (projectId: string, companyId: string) =>
+    api.post<ProjectConversation>(projectPath(projectId, companyId, "/conversation"), {}),
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Project>(`/companies/${companyId}/projects`, data),
   update: (id: string, data: Record<string, unknown>, companyId?: string) =>

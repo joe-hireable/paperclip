@@ -1,3 +1,4 @@
+import { toProjectReadModel } from "./projects.js";
 import crypto from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -2073,7 +2074,7 @@ export function routineService(
       if (!row) return null;
       const [project, assignee, parentIssue, descriptionDocument, triggers, recentRuns, activeIssue, managedByRoutine] = await Promise.all([
         row.projectId
-          ? db.select().from(projects).where(eq(projects.id, row.projectId)).then((rows) => rows[0] ?? null)
+          ? db.select().from(projects).where(eq(projects.id, row.projectId)).then((rows) => rows[0] ? toProjectReadModel(rows[0]) : null)
           : null,
         row.assigneeAgentId
           ? getRoutineAgentSummary(row.companyId, row.assigneeAgentId)

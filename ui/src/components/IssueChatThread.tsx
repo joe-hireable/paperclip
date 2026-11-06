@@ -1,3 +1,4 @@
+import { PendingIntakeError } from "../lib/use-master-intake";
 import {
   AssistantRuntimeProvider,
   useAui,
@@ -420,6 +421,7 @@ interface IssueChatComposerProps {
   onImageUpload?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<IssueAttachment | void>;
   draftKey?: string;
+  masterIntake?: boolean;
   enableReassign?: boolean;
   reassignOptions?: InlineEntityOption[];
   currentAssigneeValue?: string;
@@ -517,6 +519,7 @@ interface IssueChatThreadProps {
   imageUploadHandler?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<IssueAttachment | void>;
   draftKey?: string;
+  masterIntake?: boolean;
   enableReassign?: boolean;
   reassignOptions?: InlineEntityOption[];
   currentAssigneeValue?: string;
@@ -3862,6 +3865,7 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
   onImageUpload,
   onAttachImage,
   draftKey,
+  masterIntake = false,
   enableReassign = false,
   reassignOptions = [],
   currentAssigneeValue = "",
@@ -3878,7 +3882,9 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
   onWorkModeChange,
 }, forwardedRef) {
   const api = useAui();
-  const [body, setBody] = useState("");
+  const [body, setBody] = useState(() => masterIntake && draftKey ? loadDraft(draftKey) : "");
+  const bodyRef = useRef(body);
+  bodyRef.current = body;
   const [submitting, setSubmitting] = useState(false);
   const [attaching, setAttaching] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -3933,8 +3939,9 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
   useEffect(() => {
     return () => {
       if (draftTimer.current) clearTimeout(draftTimer.current);
+      if (masterIntake && draftKey) saveDraft(draftKey, bodyRef.current);
     };
-  }, []);
+  }, [masterIntake, draftKey]);
 
   useEffect(() => {
     setReassignTarget(effectiveSuggestedAssigneeValue);
@@ -3961,7 +3968,7 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
     const trimmed = body.trim();
     if (!trimmed || submitting) return;
 
-    const composerHasAssigneePicker = enableReassign && reassignOptions.length > 0;
+    const composerHasAssigneePicker = !masterIntake && enableReassign && reassignOptions.length > 0;
     if (composerHasAssigneePicker && isUnassignedReassignValue(reassignTarget)) {
       setNoAssigneeDialogOpen(true);
       return;
@@ -3974,20 +3981,22 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
     const trimmed = body.trim();
     if (!trimmed || submitting) return;
 
-    const hasReassignment = enableReassign && reassignTarget !== currentAssigneeValue;
+    const hasReassignment = !masterIntake && enableReassign && reassignTarget !== currentAssigneeValue;
     const reassignment = hasReassignment ? parseReassignment(reassignTarget) : undefined;
-    const reopen = shouldImplicitlyReopenComment(
+    const reopen = !masterIntake && shouldImplicitlyReopenComment(
       issueStatus,
       hasReassignment ? reassignTarget : currentAssigneeValue,
     ) ? true : undefined;
     const submittedBody = trimmed;
+    const submittedAttachments = composerAttachments;
     const viewportSnapshot = captureComposerViewportSnapshot(composerContainerRef.current);
 
     const workModeChanged = pendingWorkMode !== resolvedIssueWorkMode;
     setSubmitting(true);
+    if (masterIntake) bodyRef.current = "";
     setBody("");
     try {
-      if (workModeChanged && onWorkModeChange) {
+      if (!masterIntake && workModeChanged && onWorkModeChange) {
         await onWorkModeChange(pendingWorkMode);
       }
       const appendPromise = api.thread().append({
@@ -4004,10 +4013,18 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
       });
       queueViewportRestore(viewportSnapshot);
       await appendPromise;
-      if (draftKey) clearDraft(draftKey);
+      if (draftKey) {
+        if (masterIntake) saveDraft(draftKey, bodyRef.current);
+        else clearDraft(draftKey);
+      }
       setComposerAttachments([]);
       setReassignTarget(effectiveSuggestedAssigneeValue);
-    } catch {
+    } catch (error) {
+      if (masterIntake && error instanceof PendingIntakeError) {
+        setComposerAttachments(current => current === submittedAttachments ? [] : current);
+        if (draftKey) saveDraft(draftKey, bodyRef.current);
+        return;
+      }
       setBody((current) =>
         restoreSubmittedCommentDraft({
           currentBody: current,
@@ -4423,7 +4440,7 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
           ) : null}
         </div>
 
-        {enableReassign && reassignOptions.length > 0 ? (
+        {!masterIntake && enableReassign && reassignOptions.length > 0 ? (
           <InlineEntitySelector
             ref={reassignTriggerRef}
             value={reassignTarget}
@@ -4557,6 +4574,7 @@ export function IssueChatThread({
   imageUploadHandler,
   onAttachImage,
   draftKey,
+  masterIntake = false,
   enableReassign = false,
   reassignOptions = [],
   currentAssigneeValue = "",
@@ -5394,6 +5412,7 @@ export function IssueChatThread({
               onImageUpload={imageUploadHandler}
               onAttachImage={onAttachImage}
               draftKey={draftKey}
+              masterIntake={masterIntake}
               enableReassign={enableReassign}
               reassignOptions={reassignOptions}
               currentAssigneeValue={currentAssigneeValue}
@@ -5407,7 +5426,7 @@ export function IssueChatThread({
               composerHint={composerHint}
               issueStatus={issueStatus}
               issueWorkMode={issueWorkMode}
-              onWorkModeChange={onWorkModeChange}
+              onWorkModeChange={masterIntake ? undefined : onWorkModeChange}
             />
           </div>
         ) : null}

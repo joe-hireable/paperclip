@@ -356,6 +356,8 @@ export {
   upsertAgentInstructionsFileSchema,
   updateAgentInstructionsPathSchema,
   agentApiKeyScopeSchema,
+  projectCoordinatorRunScopeSchema,
+  type ProjectCoordinatorRunScope,
   normalizeAgentApiKeyScope,
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
@@ -389,6 +391,9 @@ export {
 export {
   createProjectSchema,
   updateProjectSchema,
+  ensureProjectConversationSchema,
+  projectCoordinationPolicySchema,
+  updateProjectCoordinationPolicySchema,
   createProjectWorkspaceSchema,
   updateProjectWorkspaceSchema,
   projectExecutionWorkspacePolicySchema,
@@ -975,3 +980,5 @@ export {
 export * from "./skill-policy.js";
 export * from "./provider-trace.js";
 export * from "./app-definition.js";
+
+export type { ProjectCoordinationPolicy } from "./project.js";

@@ -21,7 +21,7 @@ import {
   rekeyCompanyIssueIdentifiers,
 } from "../services/issue-prefix.js";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
-import { isUuidLike, normalizeAgentApiKeyScope, type DeploymentMode } from "@paperclipai/shared";
+import { agentApiKeyScopeSchema, isUuidLike, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
@@ -60,6 +60,11 @@ export { isCloudManagedInstance } from "../services/cloud-instance.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function isApprovalReaderRequest(req: Request) {
+  const match = /^\/api\/approvals\/([a-fA-F0-9-]+)(?:\/issues)?$/.exec(req.originalUrl);
+  return req.method === "GET" && match !== null && isUuidLike(match[1]!);
 }
 
 function normalizeOptionalString(value: string | null | undefined) {
@@ -359,6 +364,22 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
+      if (claims.key_scope?.kind === "approval_reader" && !isApprovalReaderRequest(req)) {
+        next(forbidden("Approval reader credentials can only read approvals and their linked issues"));
+        return;
+      }
+
+      // A coordinator token is a run-only task envelope, never a general agent key.
+      // Deny here, before any router (including plugin, secret and management shortcuts).
+      if (claims.key_scope?.kind === "project_coordinator") {
+        const path = `/api/issues/${claims.key_scope.attemptIssueId}/coordinator-`;
+        if (!((req.method === "GET" && req.originalUrl === `${path}context`) ||
+              (req.method === "PUT" && req.originalUrl === `${path}result`))) {
+          next(forbidden("Coordinator run token is restricted to its task context and result"));
+          return;
+        }
+      }
+
       const normalizedRunIdHeader = normalizeOptionalString(runIdHeader);
       if (normalizedRunIdHeader && normalizedRunIdHeader !== claims.run_id) {
         await auditAgentJwtRunHeaderMismatch(db, {
@@ -396,13 +417,26 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         agentId: claims.sub,
         companyId: claims.company_id,
         keyId: undefined,
-        keyScope: normalizeAgentApiKeyScope(claims.key_scope),
+        keyScope: claims.key_scope ?? { kind: "standard" },
         runId: claims.run_id,
         onBehalfOfUserId,
         onBehalfOfMemberships,
         source: "agent_jwt",
       };
       next();
+      return;
+    }
+
+    const keyScope = agentApiKeyScopeSchema.safeParse(key.scopeConfig ?? { kind: "standard" });
+    if (!keyScope.success || keyScope.data.kind === "project_coordinator") {
+      next(unauthorized("Agent key scope is invalid; obtain fresh credentials and retry"));
+      return;
+    }
+
+    // Enforce before every router, including plugins and management shortcuts.
+    // The allowed approval routes retain their existing company-access checks.
+    if (keyScope.data.kind === "approval_reader" && !isApprovalReaderRequest(req)) {
+      next(forbidden("Approval reader credentials can only read approvals and their linked issues"));
       return;
     }
 
@@ -450,7 +484,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       agentId: key.agentId,
       companyId: key.companyId,
       keyId: key.id,
-      keyScope: normalizeAgentApiKeyScope(key.scopeConfig),
+      keyScope: keyScope.data,
       onBehalfOfUserId: responsibleUserId,
       onBehalfOfMemberships: await loadResponsibleUserMemberships(db, {
         companyId: key.companyId,

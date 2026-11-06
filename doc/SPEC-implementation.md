@@ -556,6 +556,15 @@ Detailed ownership, execution, blocker, active-run watchdog, crash-recovery, and
 
 ## 9.3 Permission Matrix (V1)
 
+An optional `approval_reader` agent-key scope permits only `GET /api/approvals/:id`
+and `GET /api/approvals/:id/issues`, for UUID approval IDs in the actor's company.
+The authentication boundary rejects all other methods and routes, including
+approval creation, decisions, comments, agent/runtime management and plugin
+endpoints. The separate WebSocket upgrade boundary also rejects this scope.
+Existing key scopes and company-access checks remain unchanged. This
+scope grants no board approval authority; normal authentication usage metadata
+may still be recorded.
+
 | Action | Board | Agent |
 |---|---|---|
 | Create company | yes | no |

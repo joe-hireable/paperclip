@@ -355,6 +355,9 @@ export const ONBOARDING_FIRST_TASK_ORIGIN_KIND = "onboarding_first_task";
 
 export const ISSUE_ORIGIN_KINDS = [
   "manual",
+  "project_master_chat",
+  "project_coordinator_intake",
+  "project_coordinator_attempt",
   "routine_execution",
   "stale_active_run_evaluation",
   "harness_liveness_escalation",

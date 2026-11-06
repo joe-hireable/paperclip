@@ -931,6 +931,8 @@ export type {
   ProjectCodebase,
   ProjectCodebaseOrigin,
   ProjectGoalRef,
+  ProjectConversation,
+  ProjectCoordinationPolicyReadiness,
   ProjectManagedByPlugin,
   ProjectWorkspace,
   CompanySearchCountType,
@@ -1850,6 +1852,8 @@ export {
   upsertAgentInstructionsFileSchema,
   updateAgentInstructionsPathSchema,
   agentApiKeyScopeSchema,
+  projectCoordinatorRunScopeSchema,
+  type ProjectCoordinatorRunScope,
   normalizeAgentApiKeyScope,
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
@@ -1880,6 +1884,9 @@ export {
   type UpdateAgentPermissions,
   createProjectSchema,
   updateProjectSchema,
+  ensureProjectConversationSchema,
+  projectCoordinationPolicySchema,
+  updateProjectCoordinationPolicySchema,
   createProjectWorkspaceSchema,
   updateProjectWorkspaceSchema,
   type CreateProject,
@@ -2728,3 +2735,7 @@ export {
   rewriteUrlHostToLoopback,
 } from "./runtime-exposure/loopback-bind.js";
 export { ACCOUNT_HANDLE_MAX_LENGTH, toAccountHandle } from "./account-handle.js";
+
+export type { ProjectCoordinationPolicy } from "./validators/project.js";
+
+export { sourceTrustMetadataSchema } from "./validators/index.js";

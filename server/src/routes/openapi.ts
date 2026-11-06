@@ -1,3 +1,4 @@
+import { prepareCoordinatorAttemptSchema, coordinatorResultSchema, startCoordinatorAttemptSchema } from "../services/project-coordinator-attempts.js";
 import { Router } from "express";
 import { z } from "zod";
 import {
@@ -40,6 +41,9 @@ import {
   // Project
   createProjectSchema,
   updateProjectSchema,
+  ensureProjectConversationSchema,
+  projectCoordinationPolicySchema,
+  updateProjectCoordinationPolicySchema,
   createProjectWorkspaceSchema,
   updateProjectWorkspaceSchema,
   // Company
@@ -246,6 +250,20 @@ import {
   COMPANY_IMPORT_TRANSFERS_API_PATH,
   companyImportTransferDeclarationSchema,
 } from "@paperclipai/shared/company-import-transfer";
+import {
+  createExecutionBindingSchema,
+  executionBindingReasoningEffortSchema,
+  executionBindingSelectionSchema,
+} from "@paperclipai/shared/execution-bindings";
+import {
+  intelligentRoutingDecisionSchema,
+  intelligentRoutingRequirementsSchema,
+} from "@paperclipai/shared/intelligent-routing";
+import { executionBindingRequirementsSchema } from "../services/execution-binding-policy.js";
+import {
+  intelligentRoutingCandidateInputSchema,
+  intelligentRoutingContractInputSchema,
+} from "../services/intelligent-routing-contracts.js";
 
 type JsonSchema = Record<string, unknown>;
 type OpenApiResponse = Record<string, unknown>;
@@ -643,6 +661,26 @@ const importRequestBody = (schema: z.ZodTypeAny) => ({
 
 const r = responses;
 
+const projectCoordinationReadinessSchema = z.object({
+  companyId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  leadAgentId: z.string().uuid().nullable(),
+  revision: z.number().int().nonnegative(),
+  policy: projectCoordinationPolicySchema.nullable(),
+  executionReady: z.literal(false),
+  readinessReasons: z.array(z.string()),
+}).strict();
+
+// Ordinary issue/comment responses retain their broad compatibility fields.
+const coordinatorIntakeResponseFields = {
+  coordinatorIntake: z.record(z.string(), z.unknown()).optional(),
+  intakeRequestId: z.string().uuid().optional(),
+};
+const coordinatorIntakeDescription = "For a project master conversation, board-authored input atomically creates the comment and an unassigned blocked intake child; no execution is dispatched. "
+  + "Reuse the same intakeRequestId UUID with identical text and author to return the same comment and child; conflicting reuse returns 409. Requests without a UUID are distinct submissions. "
+  + "Archived projects return 409; mixed issue changes or structured metadata return 422. Intake requests permit only comment/body and intakeRequestId, plus inert false reopen/resume/interrupt flags or authorType=user. "
+  + "The response adds coordinatorIntake and intakeRequestId only for master intake; a replay may return a subsequently cancelled child. Ordinary issue comments retain their existing authorization and behaviour.";
+
 const externalObjectSummariesBodySchema = z.object({
   issueIds: z.array(z.string().guid()).max(1000),
 }).strict();
@@ -855,6 +893,21 @@ const BOARD_ONLY_PREFIXES = [
 ];
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "POST /api/projects/{id}/conversation",
+  "POST /api/issues/{id}/coordinator-attempt",
+  "POST /api/issues/{id}/coordinator-start",
+  "GET /api/projects/{id}/coordination-policy",
+  "PUT /api/projects/{id}/coordination-policy",
+  "GET /api/companies/{companyId}/execution-bindings",
+  "POST /api/companies/{companyId}/execution-bindings",
+  "POST /api/companies/{companyId}/execution-bindings/preview",
+  "POST /api/companies/{companyId}/execution-bindings/{bindingId}/disable",
+  "GET /api/companies/{companyId}/runs/{runId}/execution-binding",
+  "POST /api/companies/{companyId}/runs/{runId}/execution-binding/reconcile",
+  "GET /api/companies/{companyId}/issues/{issueId}/intelligent-routing/context",
+  "GET /api/companies/{companyId}/issues/{issueId}/intelligent-routing/contracts/latest",
+  "POST /api/companies/{companyId}/issues/{issueId}/intelligent-routing/preview",
+  "POST /api/companies/{companyId}/issues/{issueId}/intelligent-routing/contracts",
   "GET /api/cloud/stacks",
   "GET /api/companies",
   "POST /api/companies",
@@ -2339,11 +2392,16 @@ registry.registerPath({
   path: "/api/issues/{id}",
   tags: ["issues"],
   summary: "Update an issue",
+  description: coordinatorIntakeDescription + " Master intake uses the comment field and returns comment plus changes: {} alongside the issue.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(updateIssueSchema.partial()),
   },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
+  responses: { 200: r.ok(z.object({
+    ...coordinatorIntakeResponseFields,
+    comment: z.record(z.string(), z.unknown()).nullable().optional(),
+    changes: z.record(z.string(), z.unknown()).optional(),
+  }).passthrough()), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
 registry.registerPath({
@@ -2551,11 +2609,12 @@ registry.registerPath({
   path: "/api/issues/{id}/comments",
   tags: ["issues"],
   summary: "Add a comment to an issue",
+  description: coordinatorIntakeDescription + " This endpoint uses the body field and returns 201 for both new comments and identical intake replay.",
   request: {
     params: z.object({ id: z.string() }),
     body: jsonBody(addIssueCommentSchema),
   },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+  responses: { 200: r.ok(z.object(coordinatorIntakeResponseFields).passthrough()), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
 registry.registerPath({
@@ -2565,6 +2624,35 @@ registry.registerPath({
   summary: "Delete an issue comment",
   request: { params: z.object({ id: z.string(), commentId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post", path: "/api/issues/{id}/coordinator-attempt", tags: ["issues"],
+  summary: "Prepare a blocked finite coordinator attempt",
+  description: "Board-only preparation of one permanent child of an immutable intake. Requires current project policy revision, approved central instructions and an explicit same-company/project local_path projectWorkspaceId for an existing canonical directory without setup, cleanup, remote or dynamic configuration. Atomically registers and attaches one attempt-owned local workspace; does not create directories or run commands. Returns the same child and workspace on identical retry; changed authority, missing/closed workspace or path drift returns 409. Optional projectContext selects bounded native master documents, linked goals and preceding comments under both executor and responsible-user read ceilings; requires private-qualified policy. The immutable snapshot is inherited by the specialist and changes require a new attempt. No token, provider launch or dispatch is enabled.",
+  request: { params: z.object({ id: z.string() }), body: jsonBody(prepareCoordinatorAttemptSchema) },
+  responses: { 200: r.ok(z.object({ attemptId: z.string().uuid(), authorityDigest: z.string(), workspace: z.object({ projectWorkspaceId: z.string().uuid(), executionWorkspaceId: z.string().uuid(), cwd: z.string() }), executionReady: z.literal(false), readinessReason: z.literal("coordinator_delivery_not_qualified") })), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+registry.registerPath({
+  method: "post", path: "/api/issues/{id}/coordinator-start", tags: ["issues"],
+  summary: "Admit one finite qualified coordinator attempt",
+  description: "Board-only compare-and-swap admission by the immutable authority's responsible user. Requires the exact authority digest and latest board-approved routing revision for one qualified Claude manifest route, current source/policy/skills and selected project context, realised workspace and project capacity. A specialist child uses its pinned execution role and verified parent result with an actually released parent account lease; the project lead remains accountable. Reuses existing native heartbeat and physical-account lease; identical retries never create a second run. Master and intake remain context only. Returns admission, not successful execution or delivery.",
+  request: { params: z.object({id:z.string()}),body:jsonBody(startCoordinatorAttemptSchema) },
+  responses: {200:r.ok(z.object({attemptId:z.string().uuid(),admitted:z.literal(true),runId:z.string().uuid().nullable(),enqueue:z.boolean(),agentId:z.string().uuid().optional()})),400:r.badRequest,401:r.unauthorized,403:r.forbidden,404:r.notFound,409:r.conflict,422:r.unprocessable},
+});
+registry.registerPath({
+  method: "get", path: "/api/issues/{id}/coordinator-context", tags: ["issues"],
+  summary: "Read the current finite coordinator task envelope",
+  description: "Only the exact run-only coordinator JWT may read this endpoint, with no query parameters. Requires an active matching run and held binding plus unchanged source, policy and skill versions. Returns selected source/instructions/skill content, the optional immutable projectContext snapshot, and availability from the exact immutable routing contract pinned by this run's held lease. Availability is a board-recorded observation, not an independent SDK attestation or quota guarantee; unavailable or expired evidence refuses both context reads and result writes, including replay. Selected context is rechecked for current master access, document heads, comments and linked goals; drift returns 409. A specialist also receives its bounded brief and verified parent result, with the original source trust retained. Child credentials cannot read the parent's endpoint or generic management APIs. The token is minted only inside the separately admitted native finite run.",
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+registry.registerPath({
+  method: "put", path: "/api/issues/{id}/coordinator-result", tags: ["issues"],
+  summary: "Record the finite coordinator result document",
+  description: "Same run-only/current-authority checks as coordinator-context. Records one native coordinator-result document attributed to the run. A root attempt may include one bounded specialist handoff matching the board-owned policy; its immutable request is stored atomically with that result. Identical body and handoff replay returns the existing receipt; either changing returns 409. Specialist attempts cannot request grandchildren. This write does not launch a child or settle a process/lease. Only successful native settlement with the attributed result and a real released parent lease may create the single blocked, policy-assigned specialist child. Its routing and start require their own current authority.",
+  request: { params: z.object({ id: z.string().uuid() }), body: jsonBody(coordinatorResultSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registry.registerPath({
@@ -2874,6 +2962,50 @@ registry.registerPath({
   summary: "Delete a project",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/projects/{id}/conversation",
+  tags: ["projects"],
+  summary: "Get the permanent project conversation",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/projects/{id}/coordination-policy",
+  tags: ["projects"],
+  summary: "Read project coordination policy and readiness",
+  description: "Board-only project read. Returns the configured route/skill pins and current unavailability reasons without reserving capacity, probing accounts or launching work. Archived projects remain readable. Ordinary project responses expose only the safe coordination summary.",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(projectCoordinationReadinessSchema), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/api/projects/{id}/coordination-policy",
+  tags: ["projects"],
+  summary: "Replace project coordination policy with revision checking",
+  description: "Board-only; requires project read and runtime management permission. expectedRevision must match the current revision; stale revisions or archived projects return 409. "
+    + "A non-null policy requires a same-company lead role, distinct same-company binding pins and exact skill versions; invalid references return 422. Nullable policy clears the policy. "
+    + "Disabled/stale bindings and inactive leads may remain recorded as unavailable intent. Saving enabled intent does not qualify coordinator delivery or launch work; executionReady remains false, including for static_native bindings. The revision increments and the native audit records the change.",
+  request: { params: z.object({ id: z.string() }), body: jsonBody(updateProjectCoordinationPolicySchema) },
+  responses: { 200: r.ok(projectCoordinationReadinessSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/projects/{id}/conversation",
+  tags: ["projects"],
+  summary: "Create or adopt the permanent project conversation",
+  description: "Board-only operation. Ensures one permanent master issue without enabling coordinator execution.",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(ensureProjectConversationSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
 registry.registerPath({
@@ -5662,6 +5794,178 @@ registry.registerPath({
   },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
+
+// ─── Qualified execution bindings and task routing ────────────────────────────
+
+// Use Zod's OpenAPI target for these bounded contracts. Keep the existing
+// converter unchanged for unrelated routes. Custom cross-field refinements
+// (such as total case bytes and native effort compatibility) are described below.
+const routingContent = (schema: z.ZodTypeAny) => ({
+  "application/json": { schema: z.toJSONSchema(schema, { target: "openapi-3.0", io: "input" }) },
+});
+const routingBody = (schema: z.ZodTypeAny) => ({ content: routingContent(schema), required: true });
+const routingOk = (schema: z.ZodTypeAny) => ({ description: "Success", content: routingContent(schema) });
+const routingDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const routingTimestampSchema = z.string().datetime();
+const executionBindingResponseSchema = createExecutionBindingSchema.safeExtend({
+  id: z.string().uuid(), companyId: z.string().uuid(), enabled: z.boolean(), createdAt: routingTimestampSchema,
+});
+const executionBindingAuditSchema = z.object({
+  policyVersion: z.literal(1), evaluatedAt: routingTimestampSchema.nullable(),
+  quota: z.literal("unknown"), capacityReserved: z.literal(false),
+  candidates: z.array(z.object({
+    bindingId: z.string(), eligible: z.boolean(), missingCapabilities: z.array(z.string()),
+    exclusions: z.array(z.enum([
+      "invalid_binding", "duplicate_binding", "company_mismatch", "agent_not_allowed",
+      "binding_disabled", "evidence_expired", "model_unavailable", "capabilities_missing",
+      "data_class_denied", "evidence_limit_exceeded",
+    ])),
+  }).strict()),
+  eligibleBindingIds: z.array(z.string().uuid()),
+}).strict();
+const executionBindingPreviewResponseSchema = z.discriminatedUnion("status", [
+  executionBindingAuditSchema.extend({ status: z.literal("selected"), selection: executionBindingSelectionSchema }),
+  executionBindingAuditSchema.extend({
+    status: z.literal("no_selection"), reason: z.enum(["invalid_requirements", "no_eligible_candidate"]),
+    invalidFields: z.array(z.string()),
+  }),
+]);
+const executionBindingSnapshotResponseSchema = z.object({
+  version: z.literal(1), binding: executionBindingResponseSchema, selection: executionBindingSelectionSchema,
+  adapterConfig: z.record(z.string(), z.unknown()), sessionKey: z.string(), resolvedAt: routingTimestampSchema,
+  routingAuthorityDigest: routingDigestSchema.optional(),
+  routingReceipt: z.object({
+    contractId: z.string().uuid(), revision: z.number().int().positive(),
+    inputDigest: routingDigestSchema, requirementsDigest: routingDigestSchema, profileDigest: routingDigestSchema,
+  }).strict().optional(),
+}).strict();
+// The GET handler deliberately omits the private controller ownerId.
+const runExecutionBindingResponseSchema = z.object({
+  runId: z.string().uuid(), companyId: z.string().uuid(), bindingId: z.string().uuid(), accountKey: z.string(),
+  snapshot: executionBindingSnapshotResponseSchema,
+  processPid: z.number().int().nullable(), processGroupId: z.number().int().nullable(),
+  processHistory: z.array(z.object({ pid: z.number().int(), processGroupId: z.number().int().nullable() }).strict()),
+  createdAt: routingTimestampSchema, releasedAt: routingTimestampSchema.nullable(), releaseReason: z.string().nullable(),
+}).strict();
+const routingTaskInputDigestSchema = z.union([
+  z.object({
+    kind: z.literal("document").optional(), key: z.string(), documentId: z.string().uuid(),
+    revisionId: z.string().uuid().nullable(), digest: routingDigestSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("comment"), commentId: z.string().uuid(), bodyDigest: routingDigestSchema,
+    authorAgentId: z.string().uuid().nullable(), authorUserId: z.string().nullable(),
+    sourceTrustDigest: routingDigestSchema, digest: routingDigestSchema,
+  }).strict(),
+  z.object({
+    kind: z.enum(["project_workspace", "execution_workspace"]), workspaceId: z.string().uuid(),
+    cwdDigest: routingDigestSchema.nullable(), digest: routingDigestSchema,
+  }).strict(),
+]);
+const routingContextResponseSchema = z.object({
+  companyId: z.string().uuid(), issueId: z.string().uuid(), assigneeAgentId: z.string().uuid(),
+  inputDigest: routingDigestSchema, latestRevision: z.number().int().nonnegative(),
+  documentRevisionDigests: z.array(routingTaskInputDigestSchema),
+  profiles: z.array(z.discriminatedUnion("configurationResolved", [
+    z.object({
+      bindingId: z.string().uuid(), configurationResolved: z.literal(false), effortPinned: z.boolean(),
+    }).strict(),
+    z.object({
+      bindingId: z.string().uuid(), configurationResolved: z.literal(true), effortPinned: z.boolean(),
+      accountKey: z.string(), harness: z.enum(["claude_local", "codex_local"]), deliveryMode: z.literal("static_native"),
+      model: z.string(), effort: executionBindingReasoningEffortSchema.nullable(),
+      configurationDigest: routingDigestSchema, runtimeFingerprint: routingDigestSchema,
+    }).strict(),
+  ])),
+}).strict();
+const routingContractResponseSchema = z.object({
+  id: z.string().uuid(), companyId: z.string().uuid(), issueId: z.string().uuid(), assigneeAgentId: z.string().uuid(),
+  revision: z.number().int().positive(), inputDigest: routingDigestSchema,
+  requirements: intelligentRoutingRequirementsSchema,
+  candidateEvidenceSnapshot: z.array(intelligentRoutingCandidateInputSchema).min(1).max(32),
+  decision: intelligentRoutingDecisionSchema, createdByUserId: z.string(), createdAt: routingTimestampSchema,
+}).strict();
+const routingPreviewResponseSchema = z.object({
+  inputDigest: routingDigestSchema, revision: z.number().int().positive(), decision: intelligentRoutingDecisionSchema,
+}).strict();
+
+registry.registerPath({
+  method: "get", path: "/api/companies/{companyId}/execution-bindings", tags: ["execution-bindings"],
+  summary: "List qualified execution bindings for a company",
+  description: "Board actors with company access only. Includes enabled and disabled immutable definitions; does not inspect remaining quota or reserve capacity.",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: routingOk(z.array(executionBindingResponseSchema)), 401: r.unauthorized, 403: r.forbidden },
+});
+registry.registerPath({
+  method: "post", path: "/api/companies/{companyId}/execution-bindings", tags: ["execution-bindings"],
+  summary: "Create an immutable qualified native execution binding",
+  description: "Board actors with company access only. Requires one model, absolute launcher/profile paths, current qualification and company-owned allowed agents. Optional runtime paths must also be absolute. Claude effort excludes minimal and ultra. Conflicting profile/account capacity groups return 409. Creation does not log in, prove subscription entitlement or start a run.",
+  request: { params: z.object({ companyId: z.string() }), body: routingBody(createExecutionBindingSchema) },
+  responses: { 201: routingOk(executionBindingResponseSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict, 422: r.unprocessable },
+});
+registry.registerPath({
+  method: "post", path: "/api/companies/{companyId}/execution-bindings/preview", tags: ["execution-bindings"],
+  summary: "Preview deterministic binding eligibility",
+  description: "Board actors with company access only. Returns a selection or explicit no-selection audit. Does not write, reserve capacity, infer quota or start a run.",
+  request: { params: z.object({ companyId: z.string() }), body: routingBody(z.object({
+    agentId: z.string().uuid(), requirements: executionBindingRequirementsSchema,
+  }).strict()) },
+  responses: { 200: routingOk(executionBindingPreviewResponseSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+registry.registerPath({
+  method: "post", path: "/api/companies/{companyId}/execution-bindings/{bindingId}/disable", tags: ["execution-bindings"],
+  summary: "Disable future acquisition of an execution binding",
+  description: "Board actors with company access only. Requires an empty JSON object. Retains the definition and existing run reservations; does not stop a process or release capacity.",
+  request: { params: z.object({ companyId: z.string(), bindingId: z.string() }), body: routingBody(z.object({}).strict()) },
+  responses: { 200: routingOk(executionBindingResponseSchema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+registry.registerPath({
+  method: "get", path: "/api/companies/{companyId}/runs/{runId}/execution-binding", tags: ["execution-bindings"],
+  summary: "Get a run's binding snapshot and reservation",
+  description: "Board actors with company access only. Returns null when no company-scoped reservation exists. Includes the resolved snapshot and process history, but omits the private controller ownerId.",
+  request: { params: z.object({ companyId: z.string(), runId: z.string() }) },
+  responses: { 200: routingOk(runExecutionBindingResponseSchema.nullable()), 401: r.unauthorized, 403: r.forbidden },
+});
+registry.registerPath({
+  method: "post", path: "/api/companies/{companyId}/runs/{runId}/execution-binding/reconcile", tags: ["execution-bindings"],
+  summary: "Reconcile a reservation after its controller and process tree exit",
+  description: "Board actors with company access only. Requires a checkpoint reference and explicit confirmation that pending effects were reviewed. A terminal run and durable evidence that all process groups and the original controller are gone are required; otherwise returns 409. Does not kill processes or replay work.",
+  request: { params: z.object({ companyId: z.string(), runId: z.string() }), body: routingBody(z.object({
+    checkpointRef: z.string().trim().min(1).max(500), pendingEffectsReviewed: z.literal(true),
+  }).strict()) },
+  responses: { 200: routingOk(z.union([
+    z.object({ released: z.literal(false), reason: z.literal("already_released") }).strict(),
+    z.object({ released: z.literal(true), reason: z.literal("process_tree_and_controller_gone") }).strict(),
+  ])), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+registry.registerPath({
+  method: "get", path: "/api/companies/{companyId}/issues/{issueId}/intelligent-routing/context", tags: ["intelligent-routing"],
+  summary: "Get task inputs and resolvable routing profile digests",
+  description: "Board actors with company access only. Returns the current input digest, contract revision, assigned role and task-input digests (documents, comments and workspaces). Profile configuration failures remain explicit. Raw instructions, credentials and adapter configuration are not returned.",
+  request: { params: z.object({ companyId: z.string(), issueId: z.string() }) },
+  responses: { 200: routingOk(routingContextResponseSchema), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
+});
+registry.registerPath({
+  method: "get", path: "/api/companies/{companyId}/issues/{issueId}/intelligent-routing/contracts/latest", tags: ["intelligent-routing"],
+  summary: "Get the latest immutable task routing contract",
+  description: "Board actors with company access only. Returns null when the existing task has no contract; a missing company-scoped task returns 404. Retains decision metadata and author attribution, not raw training examples.",
+  request: { params: z.object({ companyId: z.string(), issueId: z.string() }) },
+  responses: { 200: routingOk(routingContractResponseSchema.nullable()), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+for (const operation of [
+  { suffix: "preview", summary: "Preview task-specific execution qualification", status: 200, schema: routingPreviewResponseSchema,
+    effect: "Read-only preview. Returns the proposed next revision and selection or no-selection audit. Does not write, reserve capacity or wake an agent." },
+  { suffix: "contracts", summary: "Append and apply an immutable task routing contract", status: 201, schema: routingContractResponseSchema,
+    effect: "Serialises on the task and appends the next revision with board attribution. Applies exactly the selected binding; a no-selection decision removes the binding and blocks the task. Does not reserve capacity or wake an agent." },
+]) {
+  registry.registerPath({
+    method: "post", path: `/api/companies/{companyId}/issues/{issueId}/intelligent-routing/${operation.suffix}`,
+    tags: ["intelligent-routing"], summary: operation.summary,
+    description: "Board actors with company access only. Requires matching expectedInputDigest and expectedRevision; stale input or authority returns 409. At most 32 candidates, 4,096 total case results and 1 MiB of JSON metadata are accepted. Evaluator provenance and leakage flags are trusted attestations, not cryptographic verification. " + operation.effect,
+    request: { params: z.object({ companyId: z.string(), issueId: z.string() }), body: routingBody(intelligentRoutingContractInputSchema) },
+    responses: { [operation.status]: routingOk(operation.schema), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+  });
+}
 
 // ─── Execution workspaces ─────────────────────────────────────────────────────
 

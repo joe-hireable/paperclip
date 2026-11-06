@@ -5,6 +5,9 @@ import { buildIssuePropertiesPanelKey } from "./issue-properties-panel-key";
 function createIssue(overrides: Partial<Issue> = {}) {
   return {
     id: "issue-1",
+    title: "Task",
+    description: null,
+    assigneeAdapterOverrides: null,
     status: "in_progress" as const,
     priority: "medium" as const,
     assigneeAgentId: "agent-1",
@@ -38,6 +41,16 @@ describe("buildIssuePropertiesPanelKey", () => {
     );
 
     expect(second).toBe(first);
+  });
+
+  it("refreshes bound input and saved qualification props without depending on timestamp churn", () => {
+    const initial = createIssue();
+    const key = buildIssuePropertiesPanelKey(initial, []);
+    for (const change of [
+      { title: "Changed task" },
+      { description: "Changed authority" },
+      { assigneeAdapterOverrides: { executionBinding: { bindingId: "binding", model: "model", dataClass: "private" as const, requiredCapabilities: ["text"], reason: "Review", evidenceRefs: ["evidence"] } } },
+    ]) expect(buildIssuePropertiesPanelKey(createIssue(change), [])).not.toBe(key);
   });
 
   it("changes when a displayed property changes", () => {

@@ -1,3 +1,4 @@
+import { coordinatorDeliveryManifestSchema } from "@paperclipai/shared/coordinator-delivery";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -401,7 +402,40 @@ export async function runClaudeLogin(input: {
   });
 }
 
+function staticRoutingError(code: string) {
+  return Object.assign(new Error(code), { code });
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const coordinator = ctx.config.intelligentRoutingDeliveryMode === "manifest_coordinator";
+  // These models require an untracked --version process before onMeta. Keep
+  // coordinator execution unavailable until that probe has qualified ownership.
+  if (coordinator && minimumClaudeCliVersionForModel(asString(ctx.config.model, ""))) {
+    throw staticRoutingError("coordinator_cli_version_qualification_required");
+  }
+  const manifest = coordinator ? coordinatorDeliveryManifestSchema.parse(ctx.context.paperclipCoordinator) : null;
+  const staticNative = ctx.config.intelligentRoutingDeliveryMode === "static_native" || coordinator;
+  if (manifest && (!ctx.onMeta || !ctx.authToken || manifest.runId !== ctx.runId || manifest.companyId !== ctx.agent.companyId ||
+      manifest.attemptIssueId !== ctx.context.issueId || manifest.model !== ctx.config.model || manifest.effort !== ctx.config.effort ||
+      manifest.maxTurns !== ctx.config.maxTurnsPerRun || manifest.timeoutSec !== ctx.config.timeoutSec || !asString(ctx.context.coordinatorPrompt, ""))) {
+    throw staticRoutingError("coordinator_preparation_required");
+  }
+  if (ctx.config.intelligentRoutingDeliveryMode !== undefined && !staticNative) {
+    throw staticRoutingError("intelligent_routing_delivery_mode_unsupported");
+  }
+  if (staticNative && (
+    ctx.config.engine !== "cli" ||
+    asStringArray(ctx.config.extraArgs).length > 0 ||
+    asStringArray(ctx.config.args).length > 0 ||
+    asBoolean(ctx.config.chrome, false) ||
+    (ctx.runtimeMcp?.getServers() ?? []).length > 0 ||
+    ctx.runtimeTools != null ||
+    ctx.context.paperclipManagedMcp != null ||
+    ctx.context.paperclipRuntimeTools != null ||
+    ctx.context.paperclipRuntimeMcp != null
+  )) {
+    throw staticRoutingError("intelligent_routing_dynamic_delivery_denied");
+  }
   const engineSelection = await resolveClaudeExecutionEngineForRun(ctx);
   if (engineSelection.engine === "acp") {
     try {
@@ -426,6 +460,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   const executionTargetIsSandbox = executionTarget?.kind === "remote" && executionTarget.transport === "sandbox";
+  if (staticNative && executionTargetIsRemote) {
+    throw staticRoutingError("intelligent_routing_remote_delivery_denied");
+  }
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -454,7 +491,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const hasExplicitClaudeConfigDir =
     typeof configEnv.CLAUDE_CONFIG_DIR === "string" && configEnv.CLAUDE_CONFIG_DIR.trim().length > 0;
-  const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+  const instructionsFilePath = manifest ? path.join(manifest.rootPath,"instructions.md") : asString(config.instructionsFilePath, "").trim();
   const instructionsFileDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
   const runtimeConfig = await buildClaudeRuntimeConfig({
     runId,
@@ -491,7 +528,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ),
   );
   const billingType = resolveClaudeBillingType(effectiveEnv);
-  const claudeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
+  const claudeSkillEntries = staticNative ? [] : await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = new Set(resolveClaudeDesiredSkillNames(config, claudeSkillEntries));
   // When instructionsFilePath is configured, build a stable content-addressed
   // file that includes both the file content and the path directive, so we only
@@ -507,6 +544,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `./HEARTBEAT.md, ./SOUL.md, and ./TOOLS.md; do not resolve those from the parent agent directory.`;
       combinedInstructionsContents = instructionsContent + pathDirective;
     } catch (err) {
+      if (staticNative) throw staticRoutingError("intelligent_routing_instructions_unavailable");
       const reason = err instanceof Error ? err.message : String(err);
       await onLog(
         "stderr",
@@ -547,7 +585,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     instructionsContents: combinedInstructionsContents,
     onLog,
   });
-  const runtimeMcpServers = ctx.runtimeMcp?.getServers() ?? [];
+  const runtimeMcpServers = staticNative ? [] : ctx.runtimeMcp?.getServers() ?? [];
   const runtimeMcpIdentity = JSON.stringify(
     runtimeMcpServers.map(({ name, url, connectionId }) => ({ name, url, connectionId })),
   );
@@ -665,11 +703,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const restoreRemoteWorkspace = preparedExecutionTargetRuntime
     ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
     : null;
-  const effectivePromptBundleAddDir = executionTargetIsRemote
+  const effectivePromptBundleAddDir = manifest ? manifest.rootPath : executionTargetIsRemote
     ? preparedExecutionTargetRuntime?.assetDirs.skills ??
       path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "claude", "skills")
     : promptBundle.addDir;
-  const effectiveInstructionsFilePath = promptBundle.instructionsFilePath
+  const effectiveInstructionsFilePath = manifest ? path.join(manifest.rootPath,"instructions.md") : promptBundle.instructionsFilePath
     ? executionTargetIsRemote
       ? path.posix.join(effectivePromptBundleAddDir, path.basename(promptBundle.instructionsFilePath))
       : promptBundle.instructionsFilePath
@@ -761,6 +799,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
+  if (coordinator && runtimeSessionId) throw staticRoutingError("coordinator_resume_denied");
   const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
   const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
   const runtimePromptBundleKey = asString(runtimeSessionParams.promptBundleKey, "");
@@ -854,7 +893,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ? ""
     : renderTemplate(promptTemplate, templateData);
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
-  const prompt = joinPromptSections([
+  const prompt = coordinator ? asString(context.coordinatorPrompt, "") : joinPromptSections([
     renderedBootstrapPrompt,
     wakePrompt,
     sessionHandoffNote,
@@ -878,6 +917,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     attemptInstructionsFilePath: string | undefined,
   ) => {
     const args = ["--print", "--output-format", "stream-json", "--verbose"];
+    // --safe-mode preserves native OAuth and permissions. --bare does not.
+    // Explicit appended instructions still travel through the file transport.
+    if (staticNative) args.push("--safe-mode", "--disable-slash-commands", "--no-chrome");
+    if (manifest) args.push("--coordinator-transport", manifest.toolTransport, "--coordinator-timeout-sec", String(manifest.timeoutSec), "--tools", "");
     if (resumeSessionId) args.push("--resume", resumeSessionId);
     args.push(...buildClaudeExecutionPermissionArgs({
       dangerouslySkipPermissions,
@@ -899,7 +942,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (attemptInstructionsFilePath && !resumeSessionId) {
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
-    if (runtimeMcpServers.length > 0) {
+    if (staticNative || runtimeMcpServers.length > 0) {
       args.push("--mcp-config", effectiveMcpConfigPath, "--strict-mcp-config");
     }
     args.push("--add-dir", effectivePromptBundleAddDir);

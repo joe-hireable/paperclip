@@ -254,7 +254,11 @@ function Memory({ state, run, busy, companyId }: ViewProps & { companyId: string
       </div></details>)}
     </Section>
     <Section title="Prepare a handoff" description="Create an immutable snapshot of the active instructions and selected current memories. The receiving worker must acknowledge the matching digest and task revision through its authenticated action.">
-      {!state.activePolicyId ? <p style={muted}>Activate shared instructions before preparing a handoff.</p> : <Form label="Create context snapshot" busy={busy} run={run} command={(data) => ({ type: "context.snapshot", id: id(), receiverId: selectedPerson(data, "receiver", "a receiving agent"), taskId: text(data, "task"), taskRevision: text(data, "revision"), memoryIds: data.getAll("memory").map(String), omissions: [] })}>
+      {!state.activePolicyId ? <p style={muted}>Activate shared instructions before preparing a handoff.</p> : <Form label="Create context snapshot" busy={busy} run={run} command={(data) => {
+        const receiverId = text(data, "receiver");
+        if (!receiverId) throw new Error("Read current task first. It must have an assigned agent before creating a context snapshot.");
+        return { type: "context.snapshot", id: id(), receiverId, taskId: text(data, "task"), taskRevision: text(data, "revision"), memoryIds: data.getAll("memory").map(String), omissions: [] };
+      }}>
         <TaskHeadFields companyId={companyId} />
         <fieldset style={stack}><legend>Memories to include</legend>
           {state.memories.filter((memory) => memory.status === "current").map((memory) => <label key={memory.id} style={row}><input type="checkbox" name="memory" value={memory.id} />{memory.title}</label>)}

@@ -16,6 +16,12 @@ function normalizeDocumentKey(key: string) {
   return parsed.data;
 }
 
+function mutableDocumentKey(raw: string) {
+  const key = normalizeDocumentKey(raw);
+  if (["coordinator-intake-source", "coordinator-attempt-authority", "coordinator-result", "coordinator-specialist-handoff"].includes(key)) throw conflict("Coordinator document is immutable");
+  return key;
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return !!error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "23505";
 }
@@ -211,7 +217,7 @@ export function documentService(db: Db) {
       sourceTrust?: typeof documents.$inferInsert.sourceTrust;
       lockedDocumentStrategy?: "conflict" | "create_new_document";
     }) => {
-      const key = normalizeDocumentKey(input.key);
+      const key = mutableDocumentKey(input.key);
       const issue = await db
         .select({ id: issues.id, companyId: issues.companyId })
         .from(issues)
@@ -531,7 +537,7 @@ export function documentService(db: Db) {
       const revisionRows: Array<Record<string, unknown>> = [];
       const linkRows: Array<Record<string, unknown>> = [];
       for (const row of rows) {
-        const key = normalizeDocumentKey(row.key);
+        const key = mutableDocumentKey(row.key);
         const documentId = randomUUID();
         const revisionId = randomUUID();
         documentRows.push({
@@ -590,7 +596,7 @@ export function documentService(db: Db) {
       createdByAgentId?: string | null;
       createdByUserId?: string | null;
     }) => {
-      const key = normalizeDocumentKey(input.key);
+      const key = mutableDocumentKey(input.key);
       return db.transaction(async (tx) => {
         const existing = await tx
           .select(issueDocumentSelect)
@@ -690,7 +696,7 @@ export function documentService(db: Db) {
       lockedByAgentId?: string | null;
       lockedByUserId?: string | null;
     }) => {
-      const key = normalizeDocumentKey(input.key);
+      const key = mutableDocumentKey(input.key);
       return db.transaction(async (tx) => {
         const existing = await tx
           .select(issueDocumentSelect)
@@ -737,7 +743,7 @@ export function documentService(db: Db) {
     },
 
     unlockIssueDocument: async (issueId: string, rawKey: string) => {
-      const key = normalizeDocumentKey(rawKey);
+      const key = mutableDocumentKey(rawKey);
       return db.transaction(async (tx) => {
         const existing = await tx
           .select(issueDocumentSelect)
@@ -784,7 +790,7 @@ export function documentService(db: Db) {
     },
 
     deleteIssueDocument: async (issueId: string, rawKey: string) => {
-      const key = normalizeDocumentKey(rawKey);
+      const key = mutableDocumentKey(rawKey);
       return db.transaction(async (tx) => {
         const existing = await tx
           .select(issueDocumentSelect)
