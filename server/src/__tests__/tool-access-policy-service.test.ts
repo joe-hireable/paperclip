@@ -1147,6 +1147,65 @@ describeEmbeddedPostgres("tool access policy service", () => {
     expect(invocations[0]).toMatchObject({ id: first.invocation.id, gatewayId: ownerGatewayId });
   });
 
+  it("replays unnamed heartbeat sessions through the run's runtime MCP gateway", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const run = await createRun(db, company.id, agent.id);
+    const { connection, catalogEntry } = await createTool(db, company.id);
+    const [profile] = await db.insert(toolProfiles).values({
+      companyId: company.id,
+      profileKey: `runtime-replay-${randomUUID()}`,
+      name: "Runtime replay fixture",
+      defaultAction: "deny",
+    }).returning();
+    await db.insert(toolProfileEntries).values({
+      companyId: company.id,
+      profileId: profile!.id,
+      selectorType: "tool_name",
+      effect: "include",
+      toolName: "send_email",
+    });
+    await db.insert(toolProfileBindings).values({
+      companyId: company.id,
+      profileId: profile!.id,
+      targetType: "company",
+      targetId: company.id,
+    });
+    const [runtimeGateway] = await db.insert(toolMcpGateways).values({
+      companyId: company.id,
+      profileId: profile!.id,
+      name: "Runtime MCP",
+      slug: `runtime-${randomUUID()}`,
+    }).returning();
+    const sessionInput = {
+      companyId: company.id,
+      actor: { actorType: "agent" as const, actorId: agent.id, agentId: agent.id },
+      runContext: { heartbeatRunId: run.id, gatewayId: null as string | null },
+      request: {
+        connectionId: connection.id,
+        catalogEntryId: catalogEntry.id,
+        toolName: "send_email",
+        arguments: { to: "ops@example.com", body: "only once" },
+        sideEffecting: true,
+        idempotencyKey: "heartbeat-runtime-1",
+      },
+    };
+    const svc = toolAccessPolicyService(db);
+    const first = await svc.recordInvocation(sessionInput, await svc.decide(sessionInput));
+    expect(first.replayed).toBe(false);
+    expect(first.invocation.gatewayId).toBeNull();
+    const runtimeInput = {
+      ...sessionInput,
+      runContext: { heartbeatRunId: run.id, gatewayId: runtimeGateway!.id },
+    };
+    const replay = await svc.recordInvocation(runtimeInput, await svc.decide(runtimeInput));
+    expect(replay).toMatchObject({
+      replayed: true,
+      invocation: { id: first.invocation.id, gatewayId: null },
+    });
+    expect(await db.select().from(toolInvocations)).toHaveLength(1);
+  });
+
   it("enforces rate-limit policies before explicit grants", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);

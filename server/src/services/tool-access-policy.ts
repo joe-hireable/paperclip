@@ -305,7 +305,14 @@ function trustRuleIsActive(policy: typeof toolPolicies.$inferSelect, now = new D
 
 function sideEffectIdempotencyKey(ctx: ToolAccessContext, argumentsHash: string, version: 1 | 2 = 2): string {
   return `side_effect:${version === 2 ? "v2:" : ""}${sha256({
-    ...(version === 2 ? { actorType: ctx.actorType, actorId: ctx.actorId, agentId: ctx.agentId } : {}),
+    ...(version === 2 ? {
+      actorType: ctx.actorType,
+      // System named-gateway tokens use the token id as actorId. Derived keys
+      // must still collide across those tokens so gateway mismatch can refuse
+      // a second side effect instead of executing twice.
+      actorId: ctx.actorType === "system" ? ctx.companyId : ctx.actorId,
+      agentId: ctx.agentId,
+    } : {}),
     companyId: ctx.companyId,
     runId: ctx.heartbeatRunId,
     issueId: ctx.issueId,
@@ -1801,9 +1808,23 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       ));
       if (existing) {
         if (existing.gatewayId !== ctx.gatewayId) {
-          throw conflict("Tool invocation idempotency key belongs to a different gateway", {
-            reasonCode: "idempotency_gateway_mismatch",
-          });
+          // Named MCP gateways stay isolated, including two named gateways on
+          // the same run. A heartbeat session has no gateway id; the run's
+          // Paperclip runtime MCP gateway is the same execution, so that
+          // unnamed-to-named pair may replay.
+          const sameHeartbeatExecution =
+            existing.agentId != null &&
+            ctx.agentId != null &&
+            existing.agentId === ctx.agentId &&
+            existing.runId != null &&
+            ctx.heartbeatRunId != null &&
+            existing.runId === ctx.heartbeatRunId;
+          const oneUnnamed = existing.gatewayId == null || ctx.gatewayId == null;
+          if (!(sameHeartbeatExecution && oneUnnamed)) {
+            throw conflict("Tool invocation idempotency key belongs to a different gateway", {
+              reasonCode: "idempotency_gateway_mismatch",
+            });
+          }
         }
         return { invocation: existing, replayed: true, actionRequest: null };
       }

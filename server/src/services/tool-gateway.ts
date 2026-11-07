@@ -8624,6 +8624,9 @@ export function createToolGatewayService(
           eq(toolActionRequests.issueId, input.session.issueId),
           inArray(toolActionRequests.canonicalArgumentsHash, [input.argumentsHash, summarizeToolValue(input.parameters).sha256]),
           eq(toolInvocations.agentId, input.session.agentId),
+          input.session.gatewayId
+            ? eq(toolInvocations.gatewayId, input.session.gatewayId)
+            : isNull(toolInvocations.gatewayId),
           eq(toolInvocations.toolName, input.toolName),
           inArray(toolActionRequests.status, [
             "pending",
@@ -10488,6 +10491,7 @@ export function createToolGatewayService(
           .insert(toolInvocations)
           .values({
             companyId: session.companyId,
+            gatewayId: session.gatewayId ?? null,
             actorType:
               session.actorType ?? (session.agentId ? "agent" : "system"),
             actorId:
@@ -10696,6 +10700,7 @@ export function createToolGatewayService(
           storedInvocation.issueId !== session.issueId ||
           storedInvocation.agentId !== session.agentId ||
           storedInvocation.runId !== session.runId ||
+          storedInvocation.gatewayId !== (session.gatewayId ?? null) ||
           actionRequest.requestedByAgentId !== (requestingActor.actorType === "agent" ? requestingActor.actorId : null)
         ) {
           throw new ToolGatewayHttpError(

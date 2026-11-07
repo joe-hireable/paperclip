@@ -16,7 +16,14 @@ This records the remaining `doc/port-notes` items against backup
 - Missing-comment retry is suppressed when a run execution binding exists.
 - Owned process-group cancellation (`signalOwnedGroup`) and its process-recovery
   tests.
-- MCP tool-gateway `isError` / `mcp_tool_error` persistence and replay.
+- MCP tool-gateway `isError` / `mcp_tool_error` persistence, replay, `gatewayId`
+  on invocation/event writes (including virtual `search_tools`), and
+  gateway-scoped approved-action lookup/`action_scope_mismatch`.
+- Idempotency isolates **named** MCP gateways. An unnamed heartbeat session and
+  the same run's Paperclip runtime MCP gateway may replay one invocation
+  (assigned-tool recovery). Two named gateways still conflict. System-actor
+  derived side-effect keys hash `companyId` as `actorId` so two named-gateway
+  tokens cannot execute the same write twice.
 - UI master intake: `IssueChatThread`, `TaskChatThread`, `TaskChatComposer`,
   `IssueDetail` notice/retry envelope, `PendingIntakeError` draft handling.
 - UI execution binding: `NewIssueDialog`, `IssueProperties`, `IssueDetail`
