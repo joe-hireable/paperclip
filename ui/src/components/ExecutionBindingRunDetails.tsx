@@ -39,7 +39,7 @@ interface ExecutionBindingRunDetailsProps {
 export function ExecutionBindingRunDetails({ record, runStatus, taskId, loading, failed }: ExecutionBindingRunDetailsProps) {
   if (failed) return <p role="alert" className="text-sm text-destructive">Could not verify the account reservation. Reload before attempting another run.</p>;
   if (loading) return <p role="status" className="text-sm text-muted-foreground">Checking account reservation…</p>;
-  if (!record) return null;
+  if (!record?.snapshot) return null;
 
   const { binding, selection, resolvedAt } = record.snapshot;
   const terminal = runStatus !== "running" && runStatus !== "queued";
