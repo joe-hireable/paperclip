@@ -4162,10 +4162,22 @@ describeEmbeddedPostgres("tool access service", () => {
       priority: 100,
       selectors: { connectionId: connection.id },
     });
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(mcpHttpResponse({
-      jsonrpc: "2.0", id: "paperclip-tool-test",
-      result: { isError: true, content: [{ type: "text", text: "Recipient was rejected" }] },
-    }));
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (body.method === "initialize") {
+        return mcpHttpResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { protocolVersion: "2025-06-18" },
+        });
+      }
+      return mcpHttpResponse({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { isError: true, content: [{ type: "text", text: "Recipient was rejected" }] },
+      });
+    });
     const gateway = createToolGatewayService(db, { toolActionSigningSecret: "test-secret" });
     const app = createRouteApp(db, boardSessionActor(company.id, "operator", userId), gateway);
     const created = await request(app)
@@ -4194,7 +4206,14 @@ describeEmbeddedPostgres("tool access service", () => {
       error: { message: expect.stringContaining("Recipient was rejected"), reasonCode: "mcp_tool_error" },
     });
     expect.soft(result.result).toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledOnce();
+    const toolCalls = fetchMock.mock.calls.filter(([, init]) => {
+      try {
+        return JSON.parse(String(init?.body ?? "{}")).method === "tools/call";
+      } catch {
+        return false;
+      }
+    });
+    expect(toolCalls).toHaveLength(1);
     const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id));
     expect.soft(invocation).toMatchObject({
       actorType: "user", actorId: userId, agentId: agent.id, runId: null,

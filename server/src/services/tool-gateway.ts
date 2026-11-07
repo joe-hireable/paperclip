@@ -849,6 +849,30 @@ function isStoredMcpToolFailure(invocation: typeof toolInvocations.$inferSelect)
   return invocation.status === "failed" && invocation.errorCode === "mcp_tool_error";
 }
 
+function providerErrorFromMcpResult(
+  result: unknown,
+  execution: { isError?: boolean; execution?: RemoteHttpExecutionAudit } | null | undefined,
+  genericReasonCode: "tool_error" | "tool_execution_failed",
+) {
+  const record = asRecord(result);
+  if (!record?.error) return null;
+  if (record.errorCode === "github_access_denied") {
+    return new ToolGatewayHttpError(
+      403,
+      String(record.content || record.error),
+      "github_access_denied",
+      execution?.execution ? { execution: execution.execution } : undefined,
+    );
+  }
+  if (mcpResultIsError(execution, result)) return null;
+  return new ToolGatewayHttpError(
+    502,
+    String(record.content || record.error),
+    genericReasonCode,
+    execution?.execution ? { execution: execution.execution } : undefined,
+  );
+}
+
 function inferToolRisk(toolName: string): ToolGatewayDescriptor["risk"] {
   const lower = toolName.toLowerCase();
   if (
@@ -7697,12 +7721,12 @@ export function createToolGatewayService(
         sensitiveMode: "redact",
         promptInjectionMode: "block", classifier: resultClassifier(args.session, args.tool, args.invocationId, { signal: args.signal, approvedAction: Boolean(args.session.approvedInvocationId) }),
       });
-      const providerResult = asRecord(resultValidation.value);
-      if (providerResult?.error) {
-        throw new ToolGatewayHttpError(providerResult.errorCode === "github_access_denied" ? 403 : 502,
-          String(providerResult.content || providerResult.error),
-          providerResult.errorCode === "github_access_denied" ? "github_access_denied" : "tool_error", { execution: connectedMcpExecution.execution });
-      }
+      const providerError = providerErrorFromMcpResult(
+        resultValidation.value,
+        connectedMcpExecution,
+        "tool_error",
+      );
+      if (providerError) throw providerError;
     } catch (err) {
       const status = err instanceof ToolGatewayHttpError ? err.status : 502;
       const reasonCode =
@@ -8282,8 +8306,15 @@ export function createToolGatewayService(
         .from(toolInvocations)
         .where(eq(toolInvocations.id, invocation.id))
         .limit(1);
-      if (settled?.status === "executed" && settledInvocation) {
-        return storedInvocationResult(settledInvocation);
+      if (
+        settledInvocation &&
+        (settled?.status === "executed" ||
+          (settled?.status === "failed" && isStoredMcpToolFailure(settledInvocation)))
+      ) {
+        return {
+          result: storedInvocationResult(settledInvocation),
+          isError: isStoredMcpToolFailure(settledInvocation),
+        };
       }
       if (settled?.status === "failed") {
         throw new ToolGatewayHttpError(
@@ -8490,59 +8521,65 @@ export function createToolGatewayService(
     try {
       await assertCurrentGatewayIssuer(session, tool, parameters, invocation.id, true);
       const executionTimeoutMs = timeoutMs(APPROVED_EXECUTION_TIMEOUT_MS);
-      const result =
+      const connectedMcpExecution =
         (tool.providerType === "mcp_remote_http" || tool.providerType === "provider_rest")
-          ? (
-              await executeRemoteHttpTool(
+          ? await executeRemoteHttpTool(
+              session,
+              tool,
+              parameters,
+              executionTimeoutMs,
+              invocation.id,
+            )
+          : tool.providerType === "mcp_local_stdio"
+            ? await executeLocalStdioTool(
                 session,
                 tool,
                 parameters,
                 executionTimeoutMs,
-                invocation.id,
               )
-            ).result
-          : tool.providerType === "mcp_local_stdio"
-            ? (
-                await executeLocalStdioTool(
-                  session,
-                  tool,
-                  parameters,
-                  executionTimeoutMs,
-                )
-              ).result
-            : tool.providerType !== "paperclip_plugin"
-              ? await runWithTimeout(
-                  executeBuiltinTool(session, tool, parameters, invocation.id),
-                  executionTimeoutMs,
-                )
-              : (() => {
-                  throw new ToolGatewayHttpError(
-                    409,
-                    "Plugin actions cannot execute outside their originating run",
-                    "approved_execution_unsupported",
-                  );
-                })();
-      const resultRecord = asRecord(result);
-      if (resultRecord?.error)
-        throw new ToolGatewayHttpError(
-          resultRecord.errorCode === "github_access_denied" ? 403 : 502,
-          String(resultRecord.content || resultRecord.error),
-          resultRecord.errorCode === "github_access_denied" ? "github_access_denied" : "tool_execution_failed",
-        );
+            : null;
+      const result = connectedMcpExecution
+        ? connectedMcpExecution.result
+        : tool.providerType !== "paperclip_plugin"
+          ? await runWithTimeout(
+              executeBuiltinTool(session, tool, parameters, invocation.id),
+              executionTimeoutMs,
+            )
+          : (() => {
+              throw new ToolGatewayHttpError(
+                409,
+                "Plugin actions cannot execute outside their originating run",
+                "approved_execution_unsupported",
+              );
+            })();
       const resultValidation = await validateToolContent({
         value: result,
         direction: "result",
         sensitiveMode: "redact",
         promptInjectionMode: "block", classifier: resultClassifier(session, tool, invocation.id, { approvedAction: true }),
       });
+      const providerError = providerErrorFromMcpResult(
+        resultValidation.value,
+        connectedMcpExecution,
+        "tool_execution_failed",
+      );
+      if (providerError) throw providerError;
+      const toolError = mcpToolFailure(
+        connectedMcpExecution,
+        resultValidation.value,
+        resultValidation.summary,
+      );
       const now = new Date();
       await db
         .update(toolInvocations)
         .set({
-          status: "succeeded",
+          status: toolError ? "failed" : "succeeded",
           resultHash: resultValidation.summary.sha256 ?? null,
           resultSummary: resultValidation.summary,
           resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
+          ...(toolError
+            ? { errorCode: toolError.errorCode, errorMessage: toolError.errorMessage }
+            : {}),
           completedAt: now,
           updatedAt: now,
         })
@@ -8550,22 +8587,24 @@ export function createToolGatewayService(
       void emitConnectionInvoked(db, invocation.id);
       await writeToolReviewChange(db, claimed.companyId, tx => tx
         .update(toolActionRequests)
-        .set({ status: "executed", resolvedAt: now, updatedAt: now })
+        .set({ status: toolError ? "failed" : "executed", resolvedAt: now, updatedAt: now })
         .where(eq(toolActionRequests.id, claimed.id)));
       await reflectToolActionInteractionLifecycle({
         actionRequestId: claimed.id,
-        status: "executed",
+        status: toolError ? "failed" : "executed",
+        errorCode: toolError?.errorCode,
+        errorMessage: toolError?.errorMessage,
         resultSummary: resultValidation.summary.summary,
       });
       await writeToolCallEvent({
         invocationId: invocation.id,
         actionRequestId: claimed.id,
         session,
-        eventType: "call_completed",
-        outcome: "success",
+        eventType: toolError ? "call_failed" : "call_completed",
+        outcome: toolError ? "failure" : "success",
         toolName: tool.name,
         policyDecision: "allow",
-        reasonCode: "approved_action_executed",
+        reasonCode: toolError ? "mcp_tool_error" : "approved_action_executed",
         argumentsSummary,
         resultSummary: resultValidation.summary,
         detectorMetadata: resultValidation.detectorMetadata,
@@ -8575,7 +8614,7 @@ export function createToolGatewayService(
         },
         tool,
       });
-      return resultValidation.value;
+      return { result: resultValidation.value, isError: Boolean(toolError) };
     } catch (error) {
       const { reasonCode } = await markApprovedActionFailed({
         actionRequestId: claimed.id,
@@ -8686,7 +8725,11 @@ export function createToolGatewayService(
       if (intent && isNewHumanIntentAfterToolRejection({ session: input.session, rejection: match.actionRequest,
         invocation: match.invocation, ...intent })) return null;
     }
-    if (match.actionRequest.status === "failed" && match.invocation.errorCode !== "provider_interaction_required") return null;
+    if (
+      match.actionRequest.status === "failed" &&
+      match.invocation.errorCode !== "provider_interaction_required" &&
+      !isStoredMcpToolFailure(match.invocation)
+    ) return null;
     // The gateway builds an ask-first request in two steps inside one call: it
     // inserts the row with a null signature and a null expiry, then signs the
     // row and sets the expiry. A concurrent matching call can observe the row in
@@ -8746,6 +8789,14 @@ export function createToolGatewayService(
     const match = await matchingAgentActionRequest(input);
     if (!match) return null;
     const { actionRequest, invocation } = match;
+    if (actionRequest.status === "failed" && isStoredMcpToolFailure(invocation)) {
+      return {
+        matched: true as const,
+        result: storedInvocationResult(invocation),
+        invocationId: invocation.id,
+        isError: true,
+      };
+    }
     if (actionRequest.status === "failed") {
       throw new ToolGatewayHttpError(409,
         "The provider is waiting for authorization or approval. Continue the existing execution; do not repeat the original call.",
@@ -8791,11 +8842,16 @@ export function createToolGatewayService(
         .from(toolInvocations)
         .where(eq(toolInvocations.id, invocation.id))
         .limit(1);
-      if (settled?.status === "executed" && settledInvocation) {
+      if (
+        settledInvocation &&
+        (settled?.status === "executed" ||
+          (settled?.status === "failed" && isStoredMcpToolFailure(settledInvocation)))
+      ) {
         return {
           matched: true as const,
           result: storedInvocationResult(settledInvocation),
           invocationId: invocation.id,
+          ...(isStoredMcpToolFailure(settledInvocation) ? { isError: true } : {}),
         };
       }
       throw new ToolGatewayHttpError(
@@ -8805,11 +8861,11 @@ export function createToolGatewayService(
       );
     }
     if (actionRequest.status === "approved" && actionRequest.decidedAt) {
-      const result = await executeApprovedAgentInvocation({
+      const execution = await executeApprovedAgentInvocation({
         actionRequest,
         invocation,
       });
-      return { matched: true as const, result, invocationId: invocation.id };
+      return { matched: true as const, ...execution, invocationId: invocation.id };
     }
     return null;
   }
@@ -10659,6 +10715,7 @@ export function createToolGatewayService(
           return {
             invocationId: replay.invocationId,
             status: "replayed" as const,
+            ...(replay.isError ? { isError: true } : {}),
             tool: virtualToolName ?? tool.name,
             targetTool: virtualToolName ? tool.name : undefined,
             result: replayResult,
@@ -11114,8 +11171,11 @@ export function createToolGatewayService(
           return {
             invocationId,
             status: "replayed" as const,
+            ...(replayedMcpFailure ? { isError: true } : {}),
             tool: tool.name,
-            result: recorded.invocation.resultSummary ?? null,
+            result: replayedMcpFailure
+              ? storedInvocationResult(recorded.invocation)
+              : recorded.invocation.resultSummary ?? null,
           };
         }
         if (accessDecision.decision === "require_approval") {
@@ -11259,17 +11319,12 @@ export function createToolGatewayService(
           promptInjectionMode: "block", classifier: resultClassifier(session, tool, invocationId, { approvedAction: Boolean(input.approvedActionRequestId), signal: input.signal }),
         });
         const completedAt = new Date();
-        const validatedMcpResult = connectedMcpExecution
-          ? asRecord(resultValidation.value)
-          : null;
-        if (validatedMcpResult?.error) {
-          throw new ToolGatewayHttpError(
-            validatedMcpResult.errorCode === "github_access_denied" ? 403 : 502,
-            String(validatedMcpResult.content || validatedMcpResult.error),
-            validatedMcpResult.errorCode === "github_access_denied" ? "github_access_denied" : "tool_error",
-            { execution: connectedMcpExecution?.execution },
-          );
-        }
+        const providerError = providerErrorFromMcpResult(
+          resultValidation.value,
+          connectedMcpExecution,
+          "tool_error",
+        );
+        if (providerError) throw providerError;
         const mcpFailure = mcpToolFailure(
           connectedMcpExecution,
           resultValidation.value,
@@ -11370,6 +11425,7 @@ export function createToolGatewayService(
         return {
           invocationId,
           status: "completed" as const,
+          ...(mcpFailure ? { isError: true } : {}),
           tool: virtualToolName ?? tool.name,
           targetTool: virtualToolName ? tool.name : undefined,
           result: resultValidation.value,

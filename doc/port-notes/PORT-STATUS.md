@@ -18,7 +18,12 @@ This records the remaining `doc/port-notes` items against backup
   tests.
 - MCP tool-gateway `isError` / `mcp_tool_error` persistence, replay, `gatewayId`
   on invocation/event writes (including virtual `search_tools`), and
-  gateway-scoped approved-action lookup/`action_scope_mismatch`.
+  gateway-scoped approved-action lookup/`action_scope_mismatch`. Provider MCP
+  `isError` results are persisted as `mcp_tool_error` (HTTP 200) rather than
+  thrown as `tool_error` (HTTP 502); `normalizeMcpToolResult` still adds an
+  `error` field for GitHub access-denied, which remains a 403.
+- Durable-account migration fixture reads `0441_complex_sunfire.sql` (Joe's
+  `0243_complex_sunfire` after journal rebase).
 - Idempotency isolates **named** MCP gateways. An unnamed heartbeat session and
   the same run's Paperclip runtime MCP gateway may replay one invocation
   (assigned-tool recovery). Two named gateways still conflict. System-actor
@@ -62,6 +67,21 @@ This records the remaining `doc/port-notes` items against backup
   running instance depends on heartbeat execute-path coordinator admission and
   manifest delivery (not only the dedicated services/tests), compare that path
   before switching.
+
+## Fork-only tests not present on upstream `3381d56639`
+
+- `project-coordinator-attempts.test.ts` (98 cases, 82 currently failing): not
+  in the remaining `doc/port-notes` list. Prepare is idempotent only when the
+  captured `projectContext` hashes identically; the second `prepare()` in the
+  snapshot test currently returns no `authorityDigest` (digest mismatch /
+  conflict). Not inlined into modular `executeRun` (see above). Live switch
+  should compare coordinator prepare/admit against the running instance.
+- `intelligent-routing-execution.test.ts` heartbeat cases are fork-only. The
+  fixture now seeds `synthetic-board` membership. Remaining failures are
+  upstream workspace-routing (`Tasks without a project require a fixed role
+  working directory…`) and adapter-throw codes flattening to `adapter_failed`.
+  The dispatch-time binding gate is covered by
+  `heartbeat-execution-bindings.test.ts`.
 
 ## Previously deferred / not in the remaining list
 
