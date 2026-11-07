@@ -19,6 +19,8 @@ describe("classifyAdapterFailureForRecovery", () => {
     expect(classifyAdapterFailureForRecovery(run)).toEqual({ kind: "configuration_incomplete" });
     expect(classifyContinuationFailure(run as never)).toMatchObject({ kind: "non_retryable", maxAttempts: 0 });
     expect(isConfigurationIncompleteFailedRun(run)).toBe(true);
+    expect(isConfigurationIncompleteFailedRun({ errorCode: "execution_binding_required" })).toBe(true);
+    expect(isConfigurationIncompleteFailedRun({ errorCode: "execution_binding_evidence_expired" })).toBe(true);
     expect(isAiAuthenticationBlocked(run as never)).toBe(false);
     const unknown = { ...run, errorCode: "adapter_failed", error: "native_provider_model_rejected" };
     expect(classifyAdapterFailureForRecovery(unknown)).toBeNull();

@@ -1,4 +1,9 @@
 import { isInterruptedNativePreparation } from "../cancelled-native-startup.js";
+import {
+  isProjectConversationContextOnlyOrigin,
+  PROJECT_MASTER_CONTEXT_ONLY_ERROR,
+  PROJECT_MASTER_CONTEXT_ONLY_MESSAGE,
+} from "./project-conversation-guard.js";
 import { isPreDispatchExecutionWaitVerified } from "../pre-dispatch-execution-wait.js";
 import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
 import { normalizeAgentNameKey } from "../agent-name-key.js";
@@ -457,6 +462,24 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       return { outcome: "not_scheduled" as const,
         reason: "Repair the invalid tool definitions before starting a new attempt.",
         issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
+    }
+    {
+      const retryIssueId = run.scopeKind === "issue" ? run.issueId : readNonEmptyString(parseObject(run.contextSnapshot).issueId) ?? run.nativeIssueId;
+      if (retryIssueId) {
+        const [retryIssue] = await db
+          .select({ originKind: issues.originKind })
+          .from(issues)
+          .where(and(eq(issues.id, retryIssueId), eq(issues.companyId, run.companyId)))
+          .limit(1);
+        if (isProjectConversationContextOnlyOrigin(retryIssue?.originKind)) {
+          return {
+            outcome: "not_scheduled" as const,
+            reason: PROJECT_MASTER_CONTEXT_ONLY_MESSAGE,
+            errorCode: PROJECT_MASTER_CONTEXT_ONLY_ERROR,
+            issueId: retryIssueId,
+          };
+        }
+      }
     }
     if (Array.isArray(run.contextSnapshot?.chatCompletionDeliveryIds) &&
         run.contextSnapshot.chatCompletionDeliveryIds.some(id => typeof id === "string")) {

@@ -106,6 +106,7 @@ import type { NativeExecutionInput, NativeSessionBackend } from "../../vendor/pa
 import type { PluginWorkerManager } from "../plugin-worker-manager.js";
 import type { RealizedExecutionWorkspace } from "../workspace-runtime.js";
 import type { reserveWarmNativeInstructionDirectory } from "../native-runtime/index.js";
+import type { ExecutionBindingSnapshot } from "@paperclipai/shared/execution-bindings";
 
 type Selection = HeartbeatRuntimeSelectionInput;
 type Selected = Extract<HeartbeatRuntimeSelectionResult, { selected: true }>;
@@ -117,6 +118,7 @@ type Lifecycle = ReturnType<typeof createHeartbeatLifecycle>;
 export interface HeartbeatRuntimeExecutionInput {
   run: typeof heartbeatRuns.$inferSelect;
   agent: typeof agents.$inferSelect;
+  executionBinding?: ExecutionBindingSnapshot | null;
   options: {
     nativeSessionBackendFactory?: (execution: NativeExecutionInput, context?: { recoveryPurpose: "execution" | "stop_cleanup" }) => NativeSessionBackend;
     pluginWorkerManager?: PluginWorkerManager;
@@ -931,6 +933,13 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
         );
       if (!guardedDispatch.dispatched) return { dispatched: false };
       adapterResult = await guardedDispatch.resultPromise;
+    }
+    if (input.executionBinding?.binding.billingRoute === "paid_api") {
+      adapterResult = {
+        ...adapterResult,
+        billingType: "api",
+        biller: input.executionBinding.binding.accountKey,
+      };
     }
     adapterResult = identityRedactor.redact(adapterResult);
     if (run.runtimeMode === "legacy" && hasWorkspaceRestoreFailure(adapterResult.resultJson)

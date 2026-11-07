@@ -631,6 +631,10 @@ async function runReleaseRecoveryTail(
       isStrandedRecoveryOrigin,
       recoveryAgentPresent: recoveryAgent !== null,
       recoveryAgentInvokable: recoveryAgent?.invokable ?? false,
+      hasBoundExecutionAttempt: await transaction.hasBoundExecutionAttempt({
+        companyId: run.companyId,
+        runId: run.id,
+      }),
     },
   });
 

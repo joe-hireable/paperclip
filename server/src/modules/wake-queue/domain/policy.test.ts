@@ -25,6 +25,7 @@ const basePreDrainFacts: PreDrainFacts = {
   executionRunIdMatchesRun: true,
   isWorkspaceValidationFailedRun: false,
   isConfigurationIncompleteFailedRun: false,
+  hasBoundExecutionAttempt: false,
   issueStatus: "in_progress",
   hasAssigneeUser: false,
   assigneeAgentMatchesRunAgent: true,
@@ -92,6 +93,26 @@ describe("decidePreDrain", () => {
       name: "released: an acknowledged execution cancellation",
       facts: { ...basePreDrainFacts, executionCancellationAcknowledged: true },
       expected: { kind: "released" },
+    },
+    {
+      name: "blocked: a bound execution attempt on an eligible in_progress issue",
+      facts: { ...basePreDrainFacts, hasBoundExecutionAttempt: true },
+      expected: { kind: "blocked", noticeKind: "bound_execution_attempt" },
+    },
+    {
+      name: "blocked: a bound execution attempt on an eligible in_review issue",
+      facts: { ...basePreDrainFacts, hasBoundExecutionAttempt: true, issueStatus: "in_review" },
+      expected: { kind: "blocked", noticeKind: "bound_execution_attempt" },
+    },
+    {
+      name: "bound attempt outranks configuration-incomplete for the blocked notice",
+      facts: {
+        ...basePreDrainFacts,
+        hasBoundExecutionAttempt: true,
+        isConfigurationIncompleteFailedRun: true,
+        issueStatus: "todo",
+      },
+      expected: { kind: "blocked", noticeKind: "bound_execution_attempt" },
     },
     {
       name: "proceed: none of the pre-drain conditions apply",
@@ -319,6 +340,7 @@ const baseReleaseRecoveryFacts: ReleaseRecoveryFacts = {
     isStrandedRecoveryOrigin: false,
     recoveryAgentPresent: true,
     recoveryAgentInvokable: true,
+    hasBoundExecutionAttempt: false,
   },
 };
 
@@ -462,6 +484,24 @@ describe("decideReleaseRecovery", () => {
         reviewParticipant: { ...baseReleaseRecoveryFacts.reviewParticipant, applies: true },
       },
       expected: { kind: "queue_review_participant_recovery" },
+    },
+    {
+      name: "blocked: a bound attempt outranks review-participant recovery",
+      facts: {
+        ...baseReleaseRecoveryFacts,
+        reviewParticipant: { ...baseReleaseRecoveryFacts.reviewParticipant, applies: true },
+        shared: { ...baseReleaseRecoveryFacts.shared, hasBoundExecutionAttempt: true },
+      },
+      expected: { kind: "blocked", notice: "bound_execution_attempt" },
+    },
+    {
+      name: "blocked: a bound attempt outranks immediate automatic retry",
+      facts: {
+        ...baseReleaseRecoveryFacts,
+        immediate: { ...baseReleaseRecoveryFacts.immediate, applies: true },
+        shared: { ...baseReleaseRecoveryFacts.shared, hasBoundExecutionAttempt: true },
+      },
+      expected: { kind: "blocked", notice: "bound_execution_attempt" },
     },
     {
       name: "review-participant recovery is evaluated before immediate recovery when both apply",

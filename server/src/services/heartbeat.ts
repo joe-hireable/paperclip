@@ -491,6 +491,7 @@ import {
 } from "./instance-settings.js";
 
 import {
+  buildBoundExecutionRecoveryNoticeSeed,
   buildConfigurationIncompleteRecoveryNoticeSeed,
   buildExecutionReviewParticipantRecoveryNoticeSeed,
   buildImmediateExecutionPathRecoveryNoticeSeed,
@@ -1181,25 +1182,33 @@ export function heartbeatService(
       | typeof EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE
       | undefined;
   } {
-    if (noticeKind === "workspace_validation") {
-      return { notice: buildWorkspaceValidationRecoveryNoticeSeed(), recoveryCause: WORKSPACE_VALIDATION_RECOVERY_CAUSE };
+    switch (noticeKind) {
+      case "workspace_validation":
+        return { notice: buildWorkspaceValidationRecoveryNoticeSeed(), recoveryCause: WORKSPACE_VALIDATION_RECOVERY_CAUSE };
+      case "configuration_incomplete": {
+        const configurationIncomplete = parseObject(parseObject(input.runRow.resultJson).configurationIncomplete);
+        return {
+          notice: buildConfigurationIncompleteRecoveryNoticeSeed(
+            Object.keys(configurationIncomplete).length > 0 ? configurationIncomplete : null,
+          ),
+          recoveryCause: CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE,
+        };
+      }
+      case "execution_review_participant":
+        return {
+          notice: buildExecutionReviewParticipantRecoveryNoticeSeed(),
+          recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE,
+        };
+      case "bound_execution_attempt":
+        return { notice: buildBoundExecutionRecoveryNoticeSeed(), recoveryCause: undefined };
+      case "immediate_execution_path":
+        return { notice: buildImmediateExecutionPathRecoveryNoticeSeed({ status: input.issueStatus }), recoveryCause: undefined };
+      default: {
+        const _exhaustive: never = noticeKind;
+        void _exhaustive;
+        return { notice: buildImmediateExecutionPathRecoveryNoticeSeed({ status: input.issueStatus }), recoveryCause: undefined };
+      }
     }
-    if (noticeKind === "configuration_incomplete") {
-      const configurationIncomplete = parseObject(parseObject(input.runRow.resultJson).configurationIncomplete);
-      return {
-        notice: buildConfigurationIncompleteRecoveryNoticeSeed(
-          Object.keys(configurationIncomplete).length > 0 ? configurationIncomplete : null,
-        ),
-        recoveryCause: CONFIGURATION_INCOMPLETE_RECOVERY_CAUSE,
-      };
-    }
-    if (noticeKind === "execution_review_participant") {
-      return {
-        notice: buildExecutionReviewParticipantRecoveryNoticeSeed(),
-        recoveryCause: EXECUTION_REVIEW_PARTICIPANT_RECOVERY_CAUSE,
-      };
-    }
-    return { notice: buildImmediateExecutionPathRecoveryNoticeSeed({ status: input.issueStatus }), recoveryCause: undefined };
   }
 
   const wakeQueue = createWakeQueue(db, {
@@ -2878,6 +2887,28 @@ export function heartbeatService(
       ): Promise<
         { dispatched: true; resultPromise: Promise<T> } | { dispatched: false }
       > => {
+        const dispatchWithBindingGate = async (markDispatchStarted: () => void) => {
+          // Re-check at the locked dispatch boundary. Acquire happens earlier;
+          // a later instance-wide registration or expired qualification must
+          // still refuse launch without invoking the adapter.
+          if (!executionBinding) {
+            await executionBindingsSvc.assertUnboundAllowed(agent.adapterType);
+          } else {
+            assertExecutionBindingConfig(
+              executionBinding,
+              runtimeConfig as Record<string, unknown>,
+              process.env,
+            );
+            await executionBindingsSvc.assertBeforeLaunch(
+              run,
+              agent,
+              executionBinding,
+              runtimeConfig as Record<string, unknown>,
+            );
+            boundAdapterStarted = true;
+          }
+          return dispatch(markDispatchStarted);
+        };
         // Recheck after preparation. The final locked gate commits a dispatch
         // claim before entering adapter bootstrap or contacting a provider.
         await authorizeFailedChatRetryExecution("dispatching");
@@ -2921,7 +2952,7 @@ export function heartbeatService(
           ...(runOptions.nativeLeaseOwner ? { recoveryLeaseOwner: runOptions.nativeLeaseOwner } : {}),
           // The gate persists admission under the ownership lock, then invokes
           // this callback after commit so provider I/O holds no accounting lock.
-          dispatch,
+          dispatch: dispatchWithBindingGate,
         });
 
         if (gate.dispatched) return gate;
@@ -3443,7 +3474,7 @@ export function heartbeatService(
         const { nativeExecution, nativeRunnerInstanceId, getNativeFreshSessionHandoff } = runtimeSelection;
         nativeWorkspaceSync = runtimeSelection.nativeWorkspaceSync;
         const execution = await measureRunPhase("execution.runtime", () => executeHeartbeatRuntime(db, {
-          run, agent, options,
+          run, agent, executionBinding, options,
           task: {
             issueRef,
             issueContext,

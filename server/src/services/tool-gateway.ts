@@ -818,16 +818,31 @@ function summarizeResult(result: unknown): Record<string, unknown> {
   };
 }
 
-function mcpToolFailure(execution: RemoteHttpExecutionResult | null, summary: ReturnType<typeof summarizeResult>) {
-  if (!execution?.isError) return null;
-  let message = summary.summary as string;
+function mcpResultIsError(execution: { isError?: boolean } | null | undefined, result: unknown) {
+  if (execution?.isError === true) return true;
+  const record = asRecord(result);
+  if (record?.isError === true) return true;
+  return asRecord(record?.data)?.isError === true;
+}
+
+function mcpToolFailure(
+  execution: { isError?: boolean } | null | undefined,
+  result: unknown,
+  summary: { summary?: unknown } | null | undefined,
+) {
+  if (!mcpResultIsError(execution, result)) return null;
+  let message = typeof summary?.summary === "string" ? summary.summary : "";
   try {
-    const result = asRecord(JSON.parse(message));
-    if (typeof result?.content === "string") message = result.content;
+    const parsed = asRecord(JSON.parse(message));
+    if (typeof parsed?.content === "string") message = parsed.content;
   } catch {
     // A truncated summary still contains a safe diagnostic.
   }
-  return { errorCode: "mcp_tool_error", errorMessage: message || "MCP tool returned an error result" };
+  if (!message) {
+    const record = asRecord(result);
+    if (typeof record?.content === "string") message = record.content;
+  }
+  return { errorCode: "mcp_tool_error" as const, errorMessage: message || "MCP tool returned an error result" };
 }
 
 function isStoredMcpToolFailure(invocation: typeof toolInvocations.$inferSelect) {
@@ -7759,17 +7774,26 @@ export function createToolGatewayService(
           : {}),
       };
     }
+    const testMcpFailure = mcpToolFailure(
+      connectedMcpExecution,
+      resultValidation.value,
+      resultValidation.summary,
+    );
     await persistToolTestOutcome(db, args.invocationId, {
-      status: "succeeded", result: resultValidation.summary,
+      status: testMcpFailure ? "failed" : "succeeded",
+      result: resultValidation.summary,
+      ...(testMcpFailure
+        ? { errorCode: testMcpFailure.errorCode, errorMessage: testMcpFailure.errorMessage }
+        : {}),
     }, args.approvedClaim);
     await writeToolCallEvent({
       invocationId: args.invocationId,
       session: args.session,
-      eventType: "call_completed",
-      outcome: "success",
+      eventType: testMcpFailure ? "call_failed" : "call_completed",
+      outcome: testMcpFailure ? "failure" : "success",
       toolName: args.tool.name,
       policyDecision: "allow",
-      reasonCode: "tool_completed",
+      reasonCode: testMcpFailure ? "mcp_tool_error" : "tool_completed",
       argumentsSummary: args.argumentsSummary,
       resultSummary: resultValidation.summary,
       detectorMetadata: resultValidation.detectorMetadata,
@@ -7788,12 +7812,12 @@ export function createToolGatewayService(
       issueId: args.session.issueId,
       actorType: args.session.actorType,
       actorId: args.session.actorId ?? args.userId,
-      action: "tool_gateway.call_completed",
+      action: testMcpFailure ? "tool_gateway.call_failed" : "tool_gateway.call_completed",
       details: {
         source: "test",
         invocationId: args.invocationId,
         decision: "allow",
-        reasonCode: "tool_completed",
+        reasonCode: testMcpFailure ? "mcp_tool_error" : "tool_completed",
         tool: args.tool.name,
         ...toolAuditMetadata(args.tool),
         durationMs: Date.now() - startedAt,
@@ -7803,9 +7827,17 @@ export function createToolGatewayService(
         promptInjection: resultValidation.detectorMetadata,
         headerSummary: connectedMcpExecution.headerSummary ?? undefined,
         execution: connectedMcpExecution.execution,
+        ...(testMcpFailure ? { error: testMcpFailure.errorMessage } : {}),
       },
     });
     void emitConnectionInvoked(db, args.invocationId);
+    if (testMcpFailure) {
+      return {
+        decision: "allowed" as const,
+        invocationId: args.invocationId,
+        error: { message: testMcpFailure.errorMessage, reasonCode: testMcpFailure.errorCode },
+      };
+    }
     return {
       decision: "allowed" as const,
       invocationId: args.invocationId,
@@ -11057,17 +11089,18 @@ export function createToolGatewayService(
         if (recorded.replayed && !retryingSlackRateLimit && !retryingGitHubPublication) {
           if (gitHubPublicationReplay && !gitHubReplayPolicyAllowed)
             throw new ToolGatewayHttpError(policyErrorStatus(accessDecision), accessDecision.explanation, accessDecision.reasonCode);
+          const replayedMcpFailure = isStoredMcpToolFailure(recorded.invocation);
           await writeAudit({
             session,
             companyId: session.companyId,
             agentId: session.agentId,
             runId: session.runId,
             issueId: session.issueId,
-            action: "tool_gateway.call_completed",
+            action: replayedMcpFailure ? "tool_gateway.call_failed" : "tool_gateway.call_completed",
             details: {
               invocationId,
               decision: "allow",
-              reasonCode: "idempotent_replay",
+              reasonCode: replayedMcpFailure ? "mcp_tool_error" : "idempotent_replay",
               tool: tool.name,
               ...toolAuditMetadata(tool),
               replayed: true,
@@ -11232,13 +11265,21 @@ export function createToolGatewayService(
             { execution: connectedMcpExecution?.execution },
           );
         }
+        const mcpFailure = mcpToolFailure(
+          connectedMcpExecution,
+          resultValidation.value,
+          resultValidation.summary,
+        );
         await db
           .update(toolInvocations)
           .set({
-            status: "succeeded",
+            status: mcpFailure ? "failed" : "succeeded",
             resultHash: resultValidation.summary.sha256 ?? null,
             resultSummary: resultValidation.summary,
             resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
+            ...(mcpFailure
+              ? { errorCode: mcpFailure.errorCode, errorMessage: mcpFailure.errorMessage }
+              : {}),
             completedAt,
             updatedAt: completedAt,
           })
@@ -11248,7 +11289,7 @@ export function createToolGatewayService(
           const [executedRequest] = await writeToolReviewChange(db, session.companyId, tx => tx
             .update(toolActionRequests)
             .set({
-              status: "executed",
+              status: mcpFailure ? "failed" : "executed",
               resolvedAt: completedAt,
               updatedAt: completedAt,
             })
@@ -11262,7 +11303,7 @@ export function createToolGatewayService(
           if (executedRequest) {
             await reflectToolActionInteractionLifecycle({
               actionRequestId: executedRequest.id,
-              status: "executed",
+              status: mcpFailure ? "failed" : "executed",
             });
           }
         }
@@ -11270,11 +11311,11 @@ export function createToolGatewayService(
           invocationId,
           actionRequestId: input.approvedActionRequestId ?? null,
           session,
-          eventType: "call_completed",
-          outcome: "success",
+          eventType: mcpFailure ? "call_failed" : "call_completed",
+          outcome: mcpFailure ? "failure" : "success",
           toolName: tool.name,
           policyDecision: input.approvedActionRequestId ? "allow" : "allow",
-          reasonCode: "tool_completed",
+          reasonCode: mcpFailure ? "mcp_tool_error" : "tool_completed",
           argumentsSummary: effectiveArgumentsSummary,
           resultSummary: resultValidation.summary,
           detectorMetadata: resultValidation.detectorMetadata,
@@ -11298,11 +11339,11 @@ export function createToolGatewayService(
           agentId: session.agentId,
           runId: session.runId,
           issueId: session.issueId,
-          action: "tool_gateway.call_completed",
+          action: mcpFailure ? "tool_gateway.call_failed" : "tool_gateway.call_completed",
           details: {
             invocationId,
             decision: "allow",
-            reasonCode: "tool_completed",
+            reasonCode: mcpFailure ? "mcp_tool_error" : "tool_completed",
             tool: tool.name,
             virtualToolName,
             targetToolName: virtualToolName ? tool.name : undefined,
@@ -11311,6 +11352,7 @@ export function createToolGatewayService(
             argumentsSummary: effectiveArgumentsSummary,
             result: summarizeResult(resultValidation.value),
             resultSummary: resultValidation.summary,
+            ...(mcpFailure ? { error: mcpFailure.errorMessage } : {}),
             promptInjection: resultValidation.detectorMetadata,
             headerSummary: connectedMcpExecution?.headerSummary ?? undefined,
             execution: connectedMcpExecution?.execution ?? undefined,

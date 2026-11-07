@@ -97,6 +97,7 @@ import {
   issueThreadInteractions,
   issues,
   issueWorkProducts,
+  runExecutionBindings,
   routines,
   workspaceOperations,
 } from "@paperclipai/db";
@@ -2436,6 +2437,25 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     agent: typeof agents.$inferSelect,
     issueId: string,
   ) {
+    const [boundAttempt] = await db
+      .select({ runId: runExecutionBindings.runId })
+      .from(runExecutionBindings)
+      .where(and(
+        eq(runExecutionBindings.companyId, run.companyId),
+        eq(runExecutionBindings.runId, run.id),
+      ))
+      .limit(1);
+    if (boundAttempt) {
+      await appendRunEvent(run, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message:
+          "Missing-comment retry suppressed because this run used an explicit execution binding",
+      });
+      return null;
+    }
+
     const invokability = await getAgentInvokability(agent);
     if (!invokability.invokable) {
       await appendRunEvent(run, {

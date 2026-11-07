@@ -74,6 +74,11 @@ import {
   unadmittedChatWakeupCondition,
 } from "../durable-chat-wakeup.js";
 import { agentService } from "../agents.js";
+import {
+  isProjectConversationContextOnlyOrigin,
+  PROJECT_MASTER_CONTEXT_ONLY_ERROR,
+  PROJECT_MASTER_CONTEXT_ONLY_MESSAGE,
+} from "./project-conversation-guard.js";
 import { normalizeLegacyRunnerProvider } from "@paperclipai/adapter-utils";
 import { randomUUID } from "node:crypto";
 import {
@@ -924,6 +929,35 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
 
     const issueId = readNonEmptyString(context.issueId);
+    const conversationIssueId = issueId ?? run.nativeIssueId;
+    if (conversationIssueId && !run.startedAt) {
+      const conversation = await getIssueExecutionContext(run.companyId, conversationIssueId);
+      if (isProjectConversationContextOnlyOrigin(conversation?.originKind)) {
+        const now = new Date();
+        const cancelled = await setRunStatus(run.id, "cancelled", {
+          finishedAt: now,
+          error: PROJECT_MASTER_CONTEXT_ONLY_MESSAGE,
+          errorCode: PROJECT_MASTER_CONTEXT_ONLY_ERROR,
+        });
+        if (cancelled) {
+          await setWakeupStatus(run.wakeupRequestId, "skipped", {
+            finishedAt: now,
+            error: PROJECT_MASTER_CONTEXT_ONLY_MESSAGE,
+          });
+          await appendRunEvent(cancelled, {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: PROJECT_MASTER_CONTEXT_ONLY_MESSAGE,
+          });
+          await releaseIssueExecutionAndPromote(cancelled, {
+            suppressImmediateRecovery: true,
+            deferredPostCommitEffects,
+          });
+        }
+        return null;
+      }
+    }
     if (issueId && activeRunExecutions.size > 0) {
       // Native finalization publishes success before workspace synchronization,
       // provider suspension, and lease release finish. A queued comment must
@@ -2221,8 +2255,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     // Mentions only annotate comments. Ignore legacy callers before creating
     // a run or deferred request; assignment and review have their own wakes.
     if (reason === "issue_comment_mentioned" || enrichedContextSnapshot.wakeReason === "issue_comment_mentioned") return null;
+    let projectConversationContextOnly = false;
     if (issueId) {
       const conversation = await getIssueExecutionContext(agent.companyId, issueId);
+      projectConversationContextOnly = isProjectConversationContextOnlyOrigin(conversation?.originKind);
       if (taskRetryActorId && conversation) await assertTaskRetryConversationAllowed(db, conversation, taskRetryActorId);
       if (reason === "issue_children_completed" && conversation?.originKind === "onboarding_first_task") enrichedContextSnapshot.onboardingCompletion = true;
       if (isConversation(conversation)) {
@@ -2477,6 +2513,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       }
       return { created: true };
     };
+    if (projectConversationContextOnly) {
+      await writeSkippedRequest(PROJECT_MASTER_CONTEXT_ONLY_ERROR);
+      return null;
+    }
     const writeSkippedHeartbeatRequest = async (
       skipReason: string,
       details: Record<string, unknown>,

@@ -21,7 +21,16 @@ export function isWorkspaceValidationFailedRun(run: { errorCode: string | null }
   return run.errorCode === WORKSPACE_VALIDATION_FAILURE_CODE;
 }
 
-export function isConfigurationIncompleteFailedRun(run: { errorCode: string | null }): boolean {
-  return run.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE || run.errorCode === "model_not_found" ||
-    run.errorCode === "native_provider_model_rejected";
+export function isConfigurationIncompleteFailedRun(
+  run: { errorCode?: string | null } | null | undefined,
+): boolean {
+  const errorCode = run?.errorCode;
+  return (
+    errorCode?.startsWith("execution_binding_") === true ||
+    errorCode?.startsWith("intelligent_routing_") === true ||
+    errorCode?.startsWith("routing_contract_") === true ||
+    errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE ||
+    errorCode === "model_not_found" ||
+    errorCode === "native_provider_model_rejected"
+  );
 }

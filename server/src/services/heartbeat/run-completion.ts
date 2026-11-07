@@ -335,7 +335,8 @@ export function isConfigurationIncompleteFailedRun(
     run?.errorCode?.startsWith("intelligent_routing_") === true ||
     run?.errorCode?.startsWith("routing_contract_") === true ||
     run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE ||
-    run?.errorCode === "model_not_found"
+    run?.errorCode === "model_not_found" ||
+    run?.errorCode === "native_provider_model_rejected"
   );
 }
 
