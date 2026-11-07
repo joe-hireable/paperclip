@@ -194,6 +194,7 @@ function MarkdownIssueLink({
   const title = data?.title ?? identifier;
   const status = data?.status;
   const issueLabel = title !== identifier ? `Issue ${identifier}: ${title}` : `Issue ${identifier}`;
+  const resolvedHref = href.replace(/^\/issues\/[^?#]+/, `/issues/${encodeURIComponent(identifier)}`);
 
   // Until the fetch settles we don't yet know whether this viewer can read the
   // issue. Keep the mention a plain link (clickable, styled as today) but hold
@@ -210,7 +211,7 @@ function MarkdownIssueLink({
 
   return (
     <Link
-      to={href}
+      to={resolvedHref}
       data-mention-kind="issue"
       disableIssueQuicklook={pending}
       data-mention-pending={pending ? "true" : undefined}

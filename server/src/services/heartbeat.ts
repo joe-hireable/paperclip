@@ -426,9 +426,9 @@ import {
   secretService,
 } from "./secrets.js";
 import { assertExecutionBindingConfig, ExecutionBindingError, executionBindingService } from "./execution-bindings.js";
+import { assertCoordinatorRunAdmission, projectCoordinatorAttemptService } from "./project-coordinator-attempts.js";
+import { isProjectConversationRun } from "./heartbeat/project-conversation-guard.js";
 import type { ExecutionBindingSnapshot } from "@paperclipai/shared/execution-bindings";
-import { assertStaticIntelligentRoutingDelivery, IntelligentRoutingRuntimeError } from "./intelligent-routing-runtime.js";
-import { IntelligentRoutingContractError } from "./intelligent-routing-contracts.js";
 import {
   resolveDefaultAgentWorkspaceDir,
 } from "../home-paths.js";
@@ -2008,6 +2008,7 @@ export function heartbeatService(
     if (run.runtimeMode === "legacy" && run.controllerBootId &&
         run.controllerBootId !== legacyControllerBootId) return;
     let executionBinding: ExecutionBindingSnapshot | null = null;
+    let coordinatorState: Awaited<ReturnType<typeof assertCoordinatorRunAdmission>> | null = null;
     let boundAdapterStarted = false;
     activeRunExecutions.add(run.id);
     const timePreparation = createHeartbeatPreparationTiming(run.id);
@@ -2136,7 +2137,23 @@ export function heartbeatService(
         await finalizeAgentStatus(agent.id, "succeeded");
         return;
       }
+      if (await isProjectConversationRun(db, run)) {
+        throw conflict("Project master conversations are context only; execute a separate child attempt");
+      }
       executionBinding = await executionBindingsSvc.acquire(run, agent);
+      if (executionBinding?.adapterConfig.intelligentRoutingDeliveryMode === "manifest_coordinator") {
+        if (!run.nativeIssueId || !executionBinding.routingReceipt) {
+          throw conflict("Coordinator run lacks native admission");
+        }
+        coordinatorState = await db.transaction((tx) =>
+          assertCoordinatorRunAdmission(tx as unknown as Db, {
+            companyId: run.companyId,
+            attemptId: run.nativeIssueId!,
+            agentId: run.agentId,
+            runId: run.id,
+          }),
+        );
+      }
       if (executionBinding) {
         agent = { ...agent, adapterType: executionBinding.binding.adapterType, adapterConfig: executionBinding.adapterConfig };
       }
@@ -2164,6 +2181,9 @@ export function heartbeatService(
       delete context[EXTERNAL_CHAT_QUESTION_RESPONSE_KEY];
       const providerTraceRequested =
         parseObject(context.debug).providerTrace === "raw";
+      if (coordinatorState && providerTraceRequested) {
+        throw conflict("Coordinator attempts do not permit provider-trace execution");
+      }
       if (providerTraceRequested) {
         if (context.providerTraceRequestSource === "agent_debug_setting") {
           try {
@@ -2212,7 +2232,7 @@ export function heartbeatService(
       const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
       const sessionCodec = getAdapterSessionCodec(agent.adapterType);
       const issueId = readNonEmptyString(context.issueId);
-      if (issueId && canApplyTaskWorkspaceSelectionAtAdmission({ admittedInput: parseObject(run.runnerProfileJson).nativeExecutionInput, restarting: Boolean(runOptions.nativeRestartRecovery), hasLeaseOwner: Boolean(runOptions.nativeLeaseOwner) })) {
+      if (issueId && !executionBinding?.routingReceipt && canApplyTaskWorkspaceSelectionAtAdmission({ admittedInput: parseObject(run.runnerProfileJson).nativeExecutionInput, restarting: Boolean(runOptions.nativeRestartRecovery), hasLeaseOwner: Boolean(runOptions.nativeLeaseOwner) })) {
         const changed = await executionWorkspacesSvc.applyPendingTaskWorkspaceSelection({ companyId: agent.companyId,
           issueId, runId: run.id, actor: { type: "agent", agentId: agent.id, companyId: agent.companyId, source: "agent_key" } });
         if (changed) {
@@ -2232,6 +2252,7 @@ export function heartbeatService(
       if (
         issueId &&
         issueContext &&
+        !coordinatorState &&
         isResolvedInteractionContinuationWakeContext(context)
       ) {
         try {
@@ -2264,6 +2285,7 @@ export function heartbeatService(
       if (
         issueId &&
         issueContext &&
+        !coordinatorState &&
         !isResolvedInteractionContinuationWakeContext(context) &&
         shouldAutoCheckoutIssueForWake({
           contextSnapshot: context,
@@ -2804,6 +2826,7 @@ export function heartbeatService(
         workspaceRestoreSource,
       } = await timePreparation("workspace", () => prepareHeartbeatWorkspace(db, {
         run, agent, controllerLease, nativeRunnerPreparationSpans,
+        skipIssueWorkspaceBinding: Boolean(executionBinding?.routingReceipt),
         task: {
           issueRef,
           issueId,
@@ -2922,12 +2945,22 @@ export function heartbeatService(
           }
           return { dispatched: false };
         }
-        const enforceContinuationOwnership = Boolean(issueId && (isFailedChatRunRetry || isResolvedInteractionContinuationWakeContext(context) ||
+        const enforceContinuationOwnership = Boolean(issueId && (coordinatorState || isFailedChatRunRetry || isResolvedInteractionContinuationWakeContext(context) ||
           typeof context.workspaceReconstructionActionId === "string" ||
           ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "")));
         if (issueId && enforceContinuationOwnership) {
           await options.beforeResolvedInteractionContinuationDispatchCheck?.({ runId: run.id, issueId });
           await options.afterResolvedInteractionContinuationDispatchCheck?.({ runId: run.id, issueId });
+        }
+        if (coordinatorState) {
+          await db.transaction((tx) =>
+            assertCoordinatorRunAdmission(tx as unknown as Db, {
+              companyId: run.companyId,
+              attemptId: coordinatorState.attempt.id,
+              agentId: run.agentId,
+              runId: run.id,
+            }),
+          );
         }
         const gate = await runDispatch.dispatchResolvedInteractionIfCurrent({
           runId: run.id,
@@ -2981,7 +3014,9 @@ export function heartbeatService(
                   executionBinding,
                   runtimeConfig as Record<string, unknown>,
                 );
-                boundAdapterStarted = true;
+                if (!coordinatorState) {
+                  boundAdapterStarted = true;
+                }
               }
               return dispatch(markDispatchStarted);
             })();
@@ -3482,7 +3517,7 @@ export function heartbeatService(
         const { nativeExecution, nativeRunnerInstanceId, getNativeFreshSessionHandoff } = runtimeSelection;
         nativeWorkspaceSync = runtimeSelection.nativeWorkspaceSync;
         const execution = await measureRunPhase("execution.runtime", () => executeHeartbeatRuntime(db, {
-          run, agent, executionBinding, options,
+          run, agent, executionBinding, coordinatorState, options,
           task: {
             issueRef,
             issueContext,
@@ -3583,6 +3618,13 @@ export function heartbeatService(
             },
             recordCurrentHeartbeatRunRuntimeProgress,
             dispatchPendingNativeStatusWakeups,
+            appendRunEvent,
+            assertBeforeLaunch: (config, authorityTransaction) => {
+              if (!executionBinding) throw conflict("Coordinator physical lease is unavailable");
+              return executionBindingsSvc.assertBeforeLaunch(
+                run, agent, executionBinding, config, authorityTransaction,
+              );
+            },
           },
           effects: {
             onUsageCaptureReady: (value) => { persistUsageCaptureFailure = value; },
@@ -3598,6 +3640,7 @@ export function heartbeatService(
             onNativeOwnershipHeld: () => { nativeOwnershipHeld = true; },
             onProviderResourceDisposition: (value) => { providerResourceDispositionForRun = value; },
             onWorkspaceRestoreFailure: (evidence) => { requiredWorkspaceRestoreEvidence = evidence; },
+            onCoordinatorVerified: () => { boundAdapterStarted = true; },
           },
         }));
         if (!execution.dispatched) return;
@@ -4081,6 +4124,15 @@ export function heartbeatService(
           isProcessAlive, isProcessGroupAlive,
           hasActiveChild: !!child && child.exitCode === null && child.signalCode === null,
         }).catch((error) => logger.error({ error, runId: run.id }, "Account reservation retained: process reconciliation failed"));
+      }
+      if (run.nativeIssueId) {
+        await projectCoordinatorAttemptService(db).settle(run.nativeIssueId, run.id)
+          .catch((error) => logger.error({ runId: run.id, error }, "Coordinator settlement remains pending"));
+      }
+      if (run.nativeIssueId && !shutdownInProgress) {
+        const { projectCoordinatorProgressionService } = await import("./project-coordinator-progression.js");
+        await projectCoordinatorProgressionService(db, enqueueWakeup).recover(await getWorktreeExecutionCutoff())
+          .catch((error) => logger.error({ runId: run.id, error }, "Coordinator continuation remains pending"));
       }
       } finally {
         controllerLease.stop();

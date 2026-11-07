@@ -21,6 +21,12 @@ export {
   type Db,
 } from "./client.js";
 export {
+  JOE_BACKUP_MIGRATION_REMAP,
+  PLUGIN_SHARED_OPERATIONS_SCHEMA,
+  liveSwitchMigrateExistingDatabase,
+  type LiveSwitchResult,
+} from "./live-switch.js";
+export {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,

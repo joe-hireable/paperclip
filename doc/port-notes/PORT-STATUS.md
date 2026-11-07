@@ -11,8 +11,24 @@ This records the remaining `doc/port-notes` items against backup
   `run_execution_bindings` row as a finite explicit attempt. Bound notice
   `bound_execution_attempt` outranks review-participant retry.
 - Project conversation context-only origins (`project_master_chat`,
-  `project_coordinator_intake`, `project_coordinator_attempt`) skip queued
-  wakeup and bounded retry (`project_master_context_only`).
+  `project_coordinator_intake`) skip queued wakeup, claim, and bounded retry
+  (`project_master_context_only`). Coordinator attempts
+  (`project_coordinator_attempt`) go through `assertCoordinatorRunAdmission`
+  on wakeup, claim, and execute.
+- Modular `executeRun` / `executeHeartbeatRuntime` now carry the backup
+  coordinator execute path: refuse context-only runs, admit
+  `manifest_coordinator`, skip provider-trace, mint a
+  `project_coordinator` JWT, prepare/verify the coordinator
+  manifest, then `assertBeforeLaunch` at the locked dispatch gate.
+  Routing receipts skip runtime skill materialization (so local-path
+  inventory reconcile cannot delete pinned coordinator skills), skip
+  pending workspace mutation, skip runtime tools/MCP, and call
+  `assertStaticIntelligentRoutingDelivery` at dispatch. Terminal
+  coordinator attempts `settle` after execute cleanup and on
+  `resumeQueuedRuns`, then `projectCoordinatorProgressionService.recover`
+  can start specialist children.
+- `MarkdownBody` UUID issue links resolve `/issues/<uuid>` to
+  `/issues/<identifier>` while keeping query and fragment.
 - Missing-comment retry is suppressed when a run execution binding exists.
 - Owned process-group cancellation (`signalOwnedGroup`) and its process-recovery
   tests.
@@ -55,49 +71,28 @@ This records the remaining `doc/port-notes` items against backup
   `reported` even when adapter `costUsd` is null). `costUsd: null` may be stored
   explicitly.
 
-## Intentionally not inlined into modular `executeRun`
-
-- Backup `heartbeat.ts` inlined `assertCoordinatorRunAdmission`,
-  `prepareCoordinatorDelivery`, and `verifyCoordinatorInvocation` inside the
-  monolith execute path. Those services already exist on this branch
-  (`project-coordinator-attempts.ts`, `coordinator-delivery.ts`) with their own
-  tests. Upstream heartbeat is modular and already special-cases
-  `project_coordinator_attempt` through intelligent-routing contracts
-  (`deliveryMode: manifest_coordinator`). Re-inlining the backup execute-path
-  blocks would be a large structural merge, not a faithful module-level port.
-  Dedicated coordinator tests remain the coverage. **Live risk:** if the
-  running instance depends on heartbeat execute-path coordinator admission and
-  manifest delivery (not only the dedicated services/tests), compare that path
-  before switching.
-
 ## Fork-only tests not present on upstream `3381d56639`
 
-- `project-coordinator-attempts.test.ts` (98 cases, 82 currently failing): not
-  in the remaining `doc/port-notes` list. Prepare is idempotent only when the
-  captured `projectContext` hashes identically; the second `prepare()` in the
-  snapshot test currently returns no `authorityDigest` (digest mismatch /
-  conflict). Not inlined into modular `executeRun` (see above). Live switch
-  should compare coordinator prepare/admit against the running instance.
-- `heartbeat-project-conversations.test.ts` admission-race cases
-  (`serializes admission behind actual adoption…`, `rechecks a legacy queued
-  insertion racing adoption…`) still fail: a concurrent `invoke`/`resume`
-  is not held behind `projectConversationService.ensure`'s open transaction.
-  Ordinary master suppression, bounded-retry skip, and unbound issue dispatch
-  pass. Same structural gap as the non-inlined execute-path coordinator
-  admission. The fixture now seeds `authUsers` + active membership for
-  `fixture-board` (same class of gap as `test-board` on the binding suite).
-- `intelligent-routing-execution.test.ts` heartbeat cases are fork-only. The
-  fixture now seeds `synthetic-board` membership. Remaining failures are
-  upstream workspace-routing (`Tasks without a project require a fixed role
-  working directory…`) and adapter-throw codes flattening to `adapter_failed`.
-  The dispatch-time binding gate is covered by
-  `heartbeat-execution-bindings.test.ts`.
+- `project-coordinator-attempts.test.ts` is fork-only. The modular execute
+  path now matches backup: ordinary auto-start, specialist handoff, pre-spawn
+  drift (including `role_config` via `assertBeforeLaunch`), and specialist
+  own-role execution.
+- `heartbeat-project-conversations.test.ts` adoption-race cases wait on the
+  same issue `FOR UPDATE` as `projectConversationService.ensure`, then recheck
+  `originKind` before insert/claim.
+- `intelligent-routing-execution.test.ts` heartbeat cases are fork-only. Bound
+  receipts no longer run `applyPendingTaskWorkspaceSelection` (that mutation
+  made project-less issues fail `loadRoutingTaskInputDigests`). Adapter
+  `intelligent_routing_instructions_unavailable` maps through
+  `executionBindingOrRoutingErrorCode` instead of collapsing to
+  `adapter_failed`.
 
-## Previously deferred / not in the remaining list
+## Live switch
 
-- `MarkdownBody` UUID issue-link resolution remains unported. Upstream
-  MarkdownBody does not have that resolver; the UI test is marked
-  `PORT-DEFERRED`.
+See `doc/port-notes/LIVE-SWITCH.md`. `pnpm db:live-switch` remaps Joe
+0240–0247 hashes/names onto 0438–0445 without re-applying them, applies
+upstream 0240–0437, and skips plugin schema
+`plugin_shared_operations_6f6f8a1ee6` when it already exists.
 
 ## Port-note adaptations after rebase verification
 
