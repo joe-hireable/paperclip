@@ -1030,6 +1030,14 @@ export function heartbeatService(
     scheduleBoundedRetry,
   } = createHeartbeatRetries(db, {
     hasCaseHandoffForRun: async (run) => Boolean(await pendingCaseHandoffForRun(db, run.id, run.companyId)),
+    getIssueOriginKind: async ({ companyId, issueId }) => {
+      const [retryIssue] = await db
+        .select({ originKind: issues.originKind })
+        .from(issues)
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
+        .limit(1);
+      return retryIssue?.originKind ?? null;
+    },
     appendRunEvent,
     escalatePlanApprovalResumeFailureNeedsAttention,
     getAgentInvokability,
@@ -2887,28 +2895,6 @@ export function heartbeatService(
       ): Promise<
         { dispatched: true; resultPromise: Promise<T> } | { dispatched: false }
       > => {
-        const dispatchWithBindingGate = async (markDispatchStarted: () => void) => {
-          // Re-check at the locked dispatch boundary. Acquire happens earlier;
-          // a later instance-wide registration or expired qualification must
-          // still refuse launch without invoking the adapter.
-          if (!executionBinding) {
-            await executionBindingsSvc.assertUnboundAllowed(agent.adapterType);
-          } else {
-            assertExecutionBindingConfig(
-              executionBinding,
-              runtimeConfig as Record<string, unknown>,
-              process.env,
-            );
-            await executionBindingsSvc.assertBeforeLaunch(
-              run,
-              agent,
-              executionBinding,
-              runtimeConfig as Record<string, unknown>,
-            );
-            boundAdapterStarted = true;
-          }
-          return dispatch(markDispatchStarted);
-        };
         // Recheck after preparation. The final locked gate commits a dispatch
         // claim before entering adapter bootstrap or contacting a provider.
         await authorizeFailedChatRetryExecution("dispatching");
@@ -2952,7 +2938,7 @@ export function heartbeatService(
           ...(runOptions.nativeLeaseOwner ? { recoveryLeaseOwner: runOptions.nativeLeaseOwner } : {}),
           // The gate persists admission under the ownership lock, then invokes
           // this callback after commit so provider I/O holds no accounting lock.
-          dispatch: dispatchWithBindingGate,
+          dispatch,
         });
 
         if (gate.dispatched) return gate;
@@ -2975,8 +2961,30 @@ export function heartbeatService(
         let entered = false;
         try {
           return await dispatchResolvedInteractionContinuationAfterAdmission((markDispatchStarted) => {
+            // The ownership gate invokes this callback synchronously, then
+            // awaits the returned promise. Binding re-checks must not run
+            // before `entered` is set, or the finally below marks usage as
+            // pre-provider and the ledger skips the real adapter charge.
             entered = true;
-            return dispatch(markDispatchStarted);
+            return (async () => {
+              if (!executionBinding) {
+                await executionBindingsSvc.assertUnboundAllowed(agent.adapterType);
+              } else {
+                assertExecutionBindingConfig(
+                  executionBinding,
+                  runtimeConfig as Record<string, unknown>,
+                  process.env,
+                );
+                await executionBindingsSvc.assertBeforeLaunch(
+                  run,
+                  agent,
+                  executionBinding,
+                  runtimeConfig as Record<string, unknown>,
+                );
+                boundAdapterStarted = true;
+              }
+              return dispatch(markDispatchStarted);
+            })();
           }, reservation);
         } finally {
           if (!entered && !reservation.reused) {

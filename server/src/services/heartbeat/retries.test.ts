@@ -20,6 +20,7 @@ type Agent = typeof agents.$inferSelect;
 function callbacks() {
   return {
     hasCaseHandoffForRun: vi.fn<HeartbeatRetryDependencies["hasCaseHandoffForRun"]>(async () => false),
+    getIssueOriginKind: vi.fn<HeartbeatRetryDependencies["getIssueOriginKind"]>(async () => null),
     getRun: vi.fn<HeartbeatRetryDependencies["getRun"]>(async () => null),
     getAgent: vi.fn<HeartbeatRetryDependencies["getAgent"]>(async () => undefined),
     resolveSessionBeforeForWakeup: vi.fn(async () => null),
@@ -128,6 +129,22 @@ describe("heartbeat retry module callbacks", () => {
     expect(database.access).not.toHaveBeenCalled();
   });
 
+  it("does not schedule a retry for project conversation context-only origins", async () => {
+    const database = guardedDatabase();
+    const deps = callbacks();
+    deps.getIssueOriginKind.mockResolvedValue("project_master_chat");
+    const retry = await extracted.createHeartbeatRetries(database.db, deps).scheduleBoundedRetryForRun(
+      unitRun(), { adapterType: "codex_local" } as Agent,
+    );
+    expect(retry).toMatchObject({
+      outcome: "not_scheduled",
+      errorCode: "project_master_context_only",
+      issueId: "issue",
+    });
+    expect(deps.appendRunEvent).not.toHaveBeenCalled();
+    expect(database.access).not.toHaveBeenCalled();
+  });
+
   it("leaves successor work to the committed case handoff without retry escalation", async () => {
     const database = guardedDatabase();
     const deps = callbacks();
@@ -232,6 +249,14 @@ describePostgres("heartbeat retry module database wiring", () => {
     const deps = {
       ...callbacks(), getRun: state.getRun, getAgent: state.getAgent,
       hasCaseHandoffForRun: async (run: Pick<Run, "id" | "companyId">) => Boolean(await pendingCaseHandoffForRun(db, run.id, run.companyId)),
+      getIssueOriginKind: async ({ companyId, issueId }: { companyId: string; issueId: string }) => {
+        const [retryIssue] = await db
+          .select({ originKind: issues.originKind })
+          .from(issues)
+          .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
+          .limit(1);
+        return retryIssue?.originKind ?? null;
+      },
       resolveSessionBeforeForWakeup: state.resolveSessionBeforeForWakeup,
       getAgentInvokability: (agent: Agent | null | undefined) => evaluateAgentInvokabilityFromDb(db, agent),
       runDispatch: createRunDispatch(db),

@@ -12,6 +12,7 @@ import {
 import {
   agents,
   agentWakeupRequests,
+  authUsers,
   companies,
   companyMemberships,
   createDb,
@@ -54,6 +55,14 @@ describe("project conversation heartbeat exclusion", () => {
       "project-conversation-dispatch-",
     );
     db = createDb(temp.connectionString);
+    await db.insert(authUsers).values({
+      id: "fixture-board",
+      name: "Fixture Board",
+      email: "fixture-board@example.test",
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }).onConflictDoNothing();
     heartbeat = heartbeatService(db);
     registerServerAdapter({
       type: ADAPTER,
@@ -90,6 +99,7 @@ describe("project conversation heartbeat exclusion", () => {
       companyId,
       principalId: "fixture-board",
       principalType: "user",
+      status: "active",
       membershipRole: "admin",
     });
     await db

@@ -38,7 +38,9 @@ This records the remaining `doc/port-notes` items against backup
   other embedded-Postgres suites.
 - Final locked dispatch gate re-checks `assertUnboundAllowed` / `assertBeforeLaunch`
   so a late instance-wide registration or expired qualification cannot reach the
-  adapter.
+  adapter. Those re-checks run *inside* the ownership-gate callback after it
+  sets `entered`, so an async binding assert cannot mark captured usage as
+  pre-provider (`accountingProviderWorkStarted: false`) and skip the ledger.
 - Paid-API bindings overlay `billingType: api` and the account-key biller onto
   adapter usage before ledger capture.
 
@@ -76,6 +78,14 @@ This records the remaining `doc/port-notes` items against backup
   snapshot test currently returns no `authorityDigest` (digest mismatch /
   conflict). Not inlined into modular `executeRun` (see above). Live switch
   should compare coordinator prepare/admit against the running instance.
+- `heartbeat-project-conversations.test.ts` admission-race cases
+  (`serializes admission behind actual adoption…`, `rechecks a legacy queued
+  insertion racing adoption…`) still fail: a concurrent `invoke`/`resume`
+  is not held behind `projectConversationService.ensure`'s open transaction.
+  Ordinary master suppression, bounded-retry skip, and unbound issue dispatch
+  pass. Same structural gap as the non-inlined execute-path coordinator
+  admission. The fixture now seeds `authUsers` + active membership for
+  `fixture-board` (same class of gap as `test-board` on the binding suite).
 - `intelligent-routing-execution.test.ts` heartbeat cases are fork-only. The
   fixture now seeds `synthetic-board` membership. Remaining failures are
   upstream workspace-routing (`Tasks without a project require a fixed role
@@ -88,3 +98,30 @@ This records the remaining `doc/port-notes` items against backup
 - `MarkdownBody` UUID issue-link resolution remains unported. Upstream
   MarkdownBody does not have that resolver; the UI test is marked
   `PORT-DEFERRED`.
+
+## Port-note adaptations after rebase verification
+
+- Context-only retry looks up `issues.originKind` through the injected
+  `getIssueOriginKind` callback so retry unit tests stay callback-only.
+- Named-gateway listing caches `resolveCompanyGatewayId` on the shared
+  decision cache. Passing `runContext.gatewayId` into every listing decision
+  otherwise queries once per catalog tool.
+- Owned process groups always receive `SIGTERM`. Codex still uses `SIGINT`
+  only for the numeric child fallback.
+- Graceful drain rethrows `owned_process_group_cleanup_incomplete` so shutdown
+  cannot report success while an owned group is still live.
+- Named-gateway JSON-RPC `tools/call` returns `{ content, isError: true }`
+  for persisted MCP `isError` results (no transport `structuredContent`
+  wrapper). GitHub access-denied remains HTTP 403. Upstream's
+  `preserves provider tool errors…` case now asserts `mcp_tool_error`
+  instead of thrown `tool_error`.
+
+## Migrations
+
+No new core DB migrations were added by this port. Drizzle keys Joe's
+0240–0247 SQL by content hash, so those files already sit at 0438–0445 on
+this branch. A database at the backup-branch schema already has those hashes
+applied; migrating to this head applies upstream 0240–0437 as new pending
+files. Plugin `plugin-shared-operations` migration `001_company_state.sql`
+(schema `plugin_shared_operations_6f6f8a1ee6`) is preserved. Do not
+re-CREATE that plugin table on a live instance that already has it.

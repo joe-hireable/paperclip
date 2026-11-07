@@ -1017,8 +1017,15 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     let routineId = input.runContext?.routineId ?? null;
     const gatewayId = input.runContext?.gatewayId ?? null;
 
-    if (gatewayId && !(await resolveCompanyGatewayId(input.companyId, gatewayId))) {
-      return { ok: false, redaction, decision: decision("deny", "deny_company_boundary", "Gateway context is outside the company or no longer exists.", [], [], { redactionPlan: redaction.redactionPlan }) };
+    if (gatewayId) {
+      const resolvedGatewayId = await cachedRead(
+        cache,
+        `company-gateway:${input.companyId}:${gatewayId}`,
+        () => resolveCompanyGatewayId(input.companyId, gatewayId),
+      );
+      if (!resolvedGatewayId) {
+        return { ok: false, redaction, decision: decision("deny", "deny_company_boundary", "Gateway context is outside the company or no longer exists.", [], [], { redactionPlan: redaction.redactionPlan }) };
+      }
     }
 
     if (input.actor.actorType === "agent") {

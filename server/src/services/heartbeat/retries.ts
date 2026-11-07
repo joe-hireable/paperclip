@@ -97,6 +97,10 @@ type PlanApprovalResumeFailure = {
 /** The retry module owns scheduling writes; the service owns lifecycle effects. */
 export interface HeartbeatRetryDependencies {
   hasCaseHandoffForRun: (run: Pick<HeartbeatRun, "id" | "companyId">) => Promise<boolean>;
+  getIssueOriginKind: (input: {
+    companyId: string;
+    issueId: string;
+  }) => Promise<string | null | undefined>;
   runDispatch: Pick<ReturnType<typeof createRunDispatch>,
     "evaluateScheduledRetryGate" | "promoteDueScheduledRetries" | "promoteScheduledRetry" | "nextScheduledRetryAt">;
   getAgent: (agentId: string) => Promise<typeof agents.$inferSelect | null | undefined>;
@@ -408,6 +412,7 @@ function readNonEmptyString(value: unknown): string | null {
 export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDependencies) {
   const {
     hasCaseHandoffForRun,
+    getIssueOriginKind,
     appendRunEvent,
     escalatePlanApprovalResumeFailureNeedsAttention,
     getAgentInvokability,
@@ -466,12 +471,11 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     {
       const retryIssueId = run.scopeKind === "issue" ? run.issueId : readNonEmptyString(parseObject(run.contextSnapshot).issueId) ?? run.nativeIssueId;
       if (retryIssueId) {
-        const [retryIssue] = await db
-          .select({ originKind: issues.originKind })
-          .from(issues)
-          .where(and(eq(issues.id, retryIssueId), eq(issues.companyId, run.companyId)))
-          .limit(1);
-        if (isProjectConversationContextOnlyOrigin(retryIssue?.originKind)) {
+        const originKind = await getIssueOriginKind({
+          companyId: run.companyId,
+          issueId: retryIssueId,
+        });
+        if (isProjectConversationContextOnlyOrigin(originKind)) {
           return {
             outcome: "not_scheduled" as const,
             reason: PROJECT_MASTER_CONTEXT_ONLY_MESSAGE,

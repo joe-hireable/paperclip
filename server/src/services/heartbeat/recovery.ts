@@ -1375,8 +1375,19 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       }
     }));
     for (const [index, settlement] of settlements.entries()) {
-      if (settlement.status === "rejected") logger.warn({ runId: activeRuns[index]!.run.id,
-        errorKind: "shutdown_settlement_failed" }, "Shutdown settlement failed; durable cleanup protection remains in place");
+      if (settlement.status === "rejected") {
+        const reason = settlement.reason;
+        if (
+          reason &&
+          typeof reason === "object" &&
+          "code" in reason &&
+          (reason as { code?: unknown }).code === "owned_process_group_cleanup_incomplete"
+        ) {
+          throw reason;
+        }
+        logger.warn({ runId: activeRuns[index]!.run.id,
+          errorKind: "shutdown_settlement_failed" }, "Shutdown settlement failed; durable cleanup protection remains in place");
+      }
     }
 
     if (interruptedRunIds.length > 0) {

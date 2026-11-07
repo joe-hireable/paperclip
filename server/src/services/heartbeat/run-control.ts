@@ -228,7 +228,9 @@ export async function terminateHeartbeatRunProcess(input: {
   signalOwnedGroup?: (signal: NodeJS.Signals) => Promise<{ status: "gone"; forceKilled: boolean }>;
 }) {
   if (input.signalOwnedGroup) {
-    await input.signalOwnedGroup(input.signal ?? "SIGTERM");
+    // Owned groups always receive SIGTERM. Codex may still use SIGINT for the
+    // numeric child fallback below so in-session tools can cancel.
+    await input.signalOwnedGroup("SIGTERM");
     return;
   }
   const pid = input.pid ?? null;
