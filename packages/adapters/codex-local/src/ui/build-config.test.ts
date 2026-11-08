@@ -36,6 +36,12 @@ function makeValues(overrides: Partial<CreateConfigValues> = {}): CreateConfigVa
 }
 
 describe("buildCodexLocalConfig", () => {
+  it("persists an explicit SSH credential mode and omits the default", () => {
+    expect(buildCodexLocalConfig(makeValues({ remoteCredentials: "native" })).remoteCredentials).toBe("native");
+    expect(buildCodexLocalConfig(makeValues())).not.toHaveProperty("remoteCredentials");
+    expect(buildPaperclipRunnerConfig(makeValues({ remoteCredentials: "native" }))).not.toHaveProperty("remoteCredentials");
+  });
+
   it("round-trips native Cursor Cloud fields and credentials without adding local command permission defaults", () => {
     const cloud = { provider: "cursor_cloud", repoUrl: "https://github.com/acme/repo", repoRef: "feature", cloudEnvType: "cloud", autoCreatePR: true };
     const env = { CURSOR_API_KEY: { type: "secret_ref" as const, secretId: "company-key", version: "latest" as const } };

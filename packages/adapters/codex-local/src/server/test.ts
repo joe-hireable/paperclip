@@ -37,6 +37,7 @@ import {
   selectVendCredential,
 } from "./codex-auth-cache.js";
 import { resolveCodexExecutionEngineForRun, testCodexAcpEnvironment } from "./acp.js";
+import { usesNativeSshCredentials } from "@paperclipai/adapter-utils/remote-credentials";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
 import { checkCodexCliVersionForModel, codexHelloProbeModelRejectionCheck } from "./cli-version.js";
 
@@ -88,6 +89,7 @@ async function prepareCodexHelloProbe(input: {
   env: Record<string, string>;
   probeApiKey: string | null;
   managedAiConnection?: boolean;
+  nativeSshCredentials?: boolean;
 }): Promise<{
   command: string;
   args: string[];
@@ -107,6 +109,15 @@ async function prepareCodexHelloProbe(input: {
       await fs.rm(probeHomeLocalDir, { recursive: true, force: true }).catch(() => {});
     }
   };
+
+  if (input.nativeSshCredentials) {
+    return {
+      command: input.command,
+      args: input.args,
+      env: { ...input.env },
+      cleanup,
+    };
+  }
 
   if (input.targetIsRemote && !input.probeApiKey) {
     // Prepare the exact home a real run would use, mirroring execute.ts: vend
@@ -471,6 +482,7 @@ export async function testEnvironment(
           : null;
       const preparedProbe = await prepareCodexHelloProbe({
         managedAiConnection: Boolean(config.managedAiConnection),
+        nativeSshCredentials: usesNativeSshCredentials(config, target),
         runId,
         companyId: ctx.companyId,
         target,

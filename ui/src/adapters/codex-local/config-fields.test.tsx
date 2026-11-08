@@ -162,6 +162,16 @@ describe("Paperclip Runner Codex configuration", () => {
         .toBe(String(resolveCodexLocalCliPolicy(config).bypass));
     });
   });
+  it("offers SSH remote credentials on legacy Codex and omits them for the runner", async () => {
+    const legacy = await renderMarkup(<TooltipProvider><CodexLocalConfigFields mode="edit" isCreate={false}
+      adapterType="codex_local" values={null} set={null} config={{}}
+      eff={(_group, _field, original) => original} mark={() => undefined} models={[]} hideInstructionsFile />
+    </TooltipProvider>);
+    expect(legacy).toContain('aria-label="SSH remote credentials"');
+    expect(legacy).toContain("Managed login");
+    const runner = await renderRunner({});
+    expect(runner).not.toContain('aria-label="SSH remote credentials"');
+  });
   it("edits the legacy execution engine through the shared keyboard picker", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

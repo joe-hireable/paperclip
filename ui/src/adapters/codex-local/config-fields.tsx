@@ -229,6 +229,33 @@ export function CodexLocalConfigFields({
           />
         </Field>
       )}
+      {!runnerManaged && (
+        <Field
+          label="SSH remote credentials"
+          hint="Managed copies this instance's Codex login to the SSH host for each run and copies a refreshed login back. Native uses the login already on the SSH host. Set CODEX_HOME to a path on that host, or leave it unset to use the host default. Sandbox runs stay managed."
+        >
+          <SelectPopover
+            aria-label="SSH remote credentials"
+            value={
+              isCreate
+                ? (values!.remoteCredentials ?? "managed")
+                : eff("adapterConfig", "remoteCredentials", String(config.remoteCredentials ?? "managed")) === "native"
+                  ? "native"
+                  : "managed"
+            }
+            onValueChange={(next) => {
+              const value = next === "native" ? "native" : "managed";
+              isCreate
+                ? set!({ remoteCredentials: value })
+                : mark("adapterConfig", "remoteCredentials", value === "managed" ? undefined : value);
+            }}
+            options={[
+              { value: "managed", label: "Managed login" },
+              { value: "native", label: "Remote host login" },
+            ]}
+          />
+        </Field>
+      )}
       {runnerManaged && !hideRunnerHarness && !isExternal && (
         <Field configSection="adapter"
           label="Harness"

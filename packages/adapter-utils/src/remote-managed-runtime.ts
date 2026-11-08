@@ -74,6 +74,50 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+const REMOTE_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+function absolutePosixDir(value: string): string | null {
+  if (!value.startsWith("/") || value.includes("\0")) return null;
+  const trimmed = value.length > 1 ? value.replace(/\/+$/, "") : value;
+  if (path.posix.normalize(trimmed) !== trimmed) return null;
+  if (trimmed.split("/").includes("..")) return null;
+  return trimmed;
+}
+
+function remotePerRunDir(baseWorkspaceRemoteDir: string, runId: string): string | null {
+  if (!REMOTE_RUN_ID_PATTERN.test(runId)) return null;
+  const base = absolutePosixDir(baseWorkspaceRemoteDir);
+  if (!base) return null;
+  const runDir = `${base}/.paperclip-runtime/runs/${runId}`;
+  return runDir.endsWith(`/.paperclip-runtime/runs/${runId}`) ? runDir : null;
+}
+
+function stagedAuthPath(assetDir: string): string | null {
+  const dir = absolutePosixDir(assetDir);
+  if (!dir || !dir.includes("/.paperclip-runtime/")) return null;
+  const authPath = `${dir}/auth.json`;
+  return authPath.endsWith("/auth.json") ? authPath : null;
+}
+
+async function bestEffortRemoteRemove(
+  spec: SshRemoteExecutionSpec,
+  remotePath: string,
+  onProgress?: RuntimeProgressSink,
+): Promise<void> {
+  try {
+    await runSshCommand(spec, `rm -rf -- ${shellQuote(remotePath)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const line = `[paperclip] Remote runtime cleanup failed for ${remotePath}: ${message}\n`;
+    console.warn(line.trim());
+    try {
+      await onProgress?.(line);
+    } catch {
+      // A log sink failure must not turn cleanup into a run failure.
+    }
+  }
+}
+
 async function readRemoteFile(spec: SshRemoteExecutionSpec, remotePath: string): Promise<Buffer> {
   const result = await runSshCommand(spec, `base64 < ${shellQuote(remotePath)}`, {
     maxBuffer: 1024 * 1024,
@@ -251,24 +295,47 @@ export async function prepareRemoteManagedRuntime(input: {
     assetDirs,
     additionalSourceDirs,
     restoreWorkspace: async (onProgress?: RuntimeProgressSink) => {
-      if (preparedWorkspace && baselineSnapshot) {
-        await restoreWorkspaceFromSshExecution({
-          spec: input.spec,
-          localDir: input.workspaceLocalDir,
-          remoteDir: workspaceRemoteDir,
-          baselineSnapshot,
-          restoreGitHistory: preparedWorkspace.gitBacked,
-          onProgress,
-          repositories: repositoryBaselines,
-        });
+      // Copy workspace edits and refreshed credentials back before removing
+      // the remote run directory. Cleanup is best-effort: a failed `rm` is
+      // logged and does not change the run result. A failed restore still
+      // removes staged auth.json files, and leaves the run directory in place
+      // so the workspace copy is not discarded before the error is reported.
+      let restoreError: unknown = null;
+      try {
+        if (preparedWorkspace && baselineSnapshot) {
+          await restoreWorkspaceFromSshExecution({
+            spec: input.spec,
+            localDir: input.workspaceLocalDir,
+            remoteDir: workspaceRemoteDir,
+            baselineSnapshot,
+            restoreGitHistory: preparedWorkspace.gitBacked,
+            onProgress,
+            repositories: repositoryBaselines,
+          });
+        }
+        for (const asset of input.assets ?? []) {
+          if (!asset.restore) continue;
+          await asset.restore({
+            assetDir: path.posix.join(runtimeRootDir, asset.key),
+            readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+          });
+        }
+      } catch (error) {
+        restoreError = error;
       }
-      for (const asset of input.assets ?? []) {
-        if (!asset.restore) continue;
-        await asset.restore({
-          assetDir: path.posix.join(runtimeRootDir, asset.key),
-          readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
-        });
+
+      const runDir = syncWorkspace ? remotePerRunDir(baseWorkspaceRemoteDir, input.runId) : null;
+      if (!restoreError && runDir) {
+        await bestEffortRemoteRemove(input.spec, runDir, onProgress);
+      } else {
+        for (const assetDir of Object.values(assetDirs)) {
+          const authPath = stagedAuthPath(assetDir);
+          if (!authPath) continue;
+          await bestEffortRemoteRemove(input.spec, authPath, onProgress);
+        }
       }
+
+      if (restoreError) throw restoreError;
     },
   };
 }

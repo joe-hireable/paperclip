@@ -69,6 +69,9 @@ export function buildCodexLocalConfig(v: CreateConfigValues): Record<string, unk
   }
   if (v.command) ac.command = v.command;
   if (v.extraArgs) ac.extraArgs = parseCommaArgs(v.extraArgs);
+  if (v.adapterType === "codex_local" && (v.remoteCredentials === "native" || v.remoteCredentials === "managed")) {
+    ac.remoteCredentials = v.remoteCredentials;
+  }
   return ac;
 }
 
@@ -95,6 +98,7 @@ export function buildPaperclipRunnerConfig(v: CreateConfigValues, context?: {
     "fastMode",
     "command",
     "extraArgs",
+    "remoteCredentials",
   ]) {
     delete config[unsupportedKey];
     delete schemaValues[unsupportedKey];

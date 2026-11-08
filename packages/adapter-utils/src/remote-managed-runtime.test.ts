@@ -11,7 +11,7 @@ const {
 } = vi.hoisted(() => ({
   prepareWorkspaceForSshExecution: vi.fn(async () => ({ gitBacked: false })),
   restoreWorkspaceFromSshExecution: vi.fn(async () => undefined),
-  runSshCommand: vi.fn(async () => ({
+  runSshCommand: vi.fn(async (_spec: unknown, _command: string) => ({
     stdout: Buffer.from('{"token":"remote"}\n').toString("base64"),
     stderr: "",
   })),
@@ -348,5 +348,126 @@ describe("remote managed runtime", () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  const sshSpec = {
+    host: "127.0.0.1",
+    port: 2222,
+    username: "fixture",
+    remoteWorkspacePath: "/app",
+    remoteCwd: "/app",
+    privateKey: "PRIVATE KEY",
+    knownHosts: "KNOWN HOSTS",
+    strictHostKeyChecking: true,
+  } as const;
+
+  it("removes the per-run directory after workspace restore and auth copy-back", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-cleanup-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const homeDir = path.join(rootDir, "home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(homeDir, { recursive: true });
+    await writeFile(path.join(homeDir, "auth.json"), '{"token":"host"}\n', "utf8");
+
+    const commands: string[] = [];
+    runSshCommand.mockImplementation(async (_spec: unknown, command: string) => {
+      commands.push(command);
+      return { stdout: Buffer.from('{"token":"remote"}\n').toString("base64"), stderr: "" };
+    });
+
+    let restoredAuth = "";
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: sshSpec,
+      runId: "run-cleanup",
+      adapterKey: "codex",
+      workspaceLocalDir: workspaceDir,
+      assets: [{
+        key: "home",
+        localDir: homeDir,
+        restore: async ({ assetDir, readFile }) => {
+          restoredAuth = (await readFile(path.posix.join(assetDir, "auth.json"))).toString("utf8");
+        },
+      }],
+    });
+
+    await prepared.restoreWorkspace();
+
+    expect(restoredAuth).toBe('{"token":"remote"}\n');
+    const readAt = commands.findIndex((command) => command.includes("auth.json"));
+    const removeAt = commands.findIndex((command) => command === "rm -rf -- '/app/.paperclip-runtime/runs/run-cleanup'");
+    expect(readAt).toBeGreaterThanOrEqual(0);
+    expect(removeAt).toBeGreaterThan(readAt);
+    expect(restoreWorkspaceFromSshExecution).toHaveBeenCalled();
+  });
+
+  it("removes staged auth.json for an in-place SSH workspace and keeps the workspace", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-cleanup-inplace-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const homeDir = path.join(rootDir, "home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(homeDir, { recursive: true });
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: sshSpec,
+      runId: "run-inplace",
+      adapterKey: "grok",
+      workspaceLocalDir: workspaceDir,
+      workspaceRemoteDir: "/app",
+      syncWorkspace: false,
+      assets: [{ key: "home", localDir: homeDir }],
+    });
+
+    await prepared.restoreWorkspace();
+
+    expect(runSshCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      "rm -rf -- '/app/.paperclip-runtime/grok/home/auth.json'",
+    );
+    const removals = runSshCommand.mock.calls.map((call) => String(call[1]));
+    expect(removals.some((command) => command === "rm -rf -- '/app'")).toBe(false);
+  });
+
+  it("still resolves restore when remote cleanup fails", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-cleanup-fail-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    runSshCommand.mockImplementation(async (_spec: unknown, command: string) => {
+      if (command.startsWith("rm ")) throw new Error("cleanup failed");
+      return { stdout: "", stderr: "" };
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const prepared = await prepareRemoteManagedRuntime({
+        spec: sshSpec,
+        runId: "run-cleanup-fail",
+        adapterKey: "codex",
+        workspaceLocalDir: workspaceDir,
+      });
+      const lines: string[] = [];
+      await expect(prepared.restoreWorkspace((line) => { lines.push(line); })).resolves.toBeUndefined();
+      expect(lines.join("")).toContain("Remote runtime cleanup failed");
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("does not remove a path outside the per-run directory when the run id is unsafe", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-remote-runtime-cleanup-unsafe-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: sshSpec,
+      runId: "../escape",
+      adapterKey: "codex",
+      workspaceLocalDir: workspaceDir,
+    });
+    runSshCommand.mockClear();
+    await prepared.restoreWorkspace();
+    expect(runSshCommand.mock.calls.map((call) => String(call[1])).some((command) => command.startsWith("rm "))).toBe(false);
   });
 });

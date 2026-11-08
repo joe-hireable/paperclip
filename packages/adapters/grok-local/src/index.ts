@@ -41,6 +41,7 @@ Core fields:
 - command (string, optional): defaults to "grok"
 - extraArgs (string[], optional): additional CLI args
 - env (object, optional): KEY=VALUE environment variables
+- remoteCredentials (string, optional): "managed" (default) or "native". Applies only when the execution target is SSH. Managed stages this instance's Grok login into the per-run remote directory and copies a refreshed login back. Native stages no auth file and copies nothing back; Grok uses GROK_HOME from this agent's env when that value is set, otherwise the SSH host's default Grok home. Sandbox runs stay managed. API-key runs (\`XAI_API_KEY\`) do not stage a home in either mode.
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds
@@ -51,7 +52,7 @@ Notes:
 - Sessions resume with \`--resume <sessionId>\` when the saved session cwd matches the current cwd.
 - Paperclip stages desired runtime skills into \`.claude/skills\` inside the execution workspace so Grok discovers them as project skills.
 - Use \`grok models\` to inspect authentication and available models on the host.
-- Local subscription runs use the host \`grok login\` (\`~/.grok\`) until the company Grok home has a usable \`auth.json\` (sandbox device login). \`XAI_API_KEY\` authenticates without a home. Remote/sandbox runs never fall back to the host login.
+- Local subscription runs use the host \`grok login\` (\`~/.grok\`) until the company Grok home has a usable \`auth.json\` (sandbox device login). \`XAI_API_KEY\` authenticates without a home. Sandbox runs, and SSH runs with \`remoteCredentials\` unset or \`"managed"\`, never fall back to the controller login: they stage the company home. SSH with \`remoteCredentials: "native"\` uses the login already on the SSH host and does not stage or copy back \`auth.json\`.
 - Without a usable company login, local runs preserve an inherited or configured \`GROK_HOME\`. Managed AI connections keep their selected home. An explicit empty \`XAI_API_KEY\` clears an inherited key and selects subscription authentication.
 - Managed local connections use disposable homes and do not retain or restore session transcripts. Missing local history starts a fresh task handoff without attempting remote subscription recovery.
 `;

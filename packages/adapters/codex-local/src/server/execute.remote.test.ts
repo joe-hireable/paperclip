@@ -26,7 +26,7 @@ const {
   resolveCommandForLogs: vi.fn(async () => "/usr/bin/codex"),
   prepareWorkspaceForSshExecution: vi.fn(async () => ({ gitBacked: false })),
   restoreWorkspaceFromSshExecution: vi.fn(async () => undefined),
-  runSshCommand: vi.fn(async () => ({ stdout: Buffer.from("{}").toString("base64"), stderr: "" })),
+  runSshCommand: vi.fn(async (_spec: unknown, _command: string) => ({ stdout: Buffer.from("{}").toString("base64"), stderr: "" })),
   syncDirectoryToSsh: vi.fn(async () => undefined),
   startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({
     env: {
@@ -693,6 +693,131 @@ describe("codex remote execution", () => {
     expect(retry).not.toContain("## Compact assignment");
     expect(retry.indexOf("comment-first")).toBeLessThan(retry.indexOf("comment-second"));
     expect(retry.split("Append the same ledger entry.")).toHaveLength(3);
+  });
+
+  function sshTarget() {
+    return {
+      kind: "remote" as const,
+      transport: "ssh" as const,
+      remoteCwd: "/remote/workspace",
+      spec: {
+        host: "127.0.0.1",
+        port: 2222,
+        username: "fixture",
+        remoteWorkspacePath: "/remote/workspace",
+        remoteCwd: "/remote/workspace",
+        privateKey: "PRIVATE KEY",
+        knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+        strictHostKeyChecking: true,
+      },
+    };
+  }
+
+  async function runRemote(config: Record<string, unknown>, workspaceDir: string) {
+    return execute({
+      runId: "run-native",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { engine: "cli", command: "codex", ...config },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      executionTarget: sshTarget(),
+      onLog: async () => {},
+    });
+  }
+
+  function spawnedEnv(): Record<string, string> {
+    const call = runChildProcess.mock.calls.at(-1) as unknown as
+      | [string, string, string[], { env: Record<string, string> }]
+      | undefined;
+    return call?.[3].env ?? {};
+  }
+
+  it("keeps managed SSH staging when remoteCredentials is unset or managed", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-managed-explicit-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    await runRemote({ remoteCredentials: "managed", env: { CODEX_HOME: codexHomeDir } }, workspaceDir);
+
+    expect(syncDirectoryToSsh).toHaveBeenCalledTimes(1);
+    expect(spawnedEnv().CODEX_HOME).toBe(
+      "/remote/workspace/.paperclip-runtime/runs/run-native/workspace/.paperclip-runtime/codex/home",
+    );
+  });
+
+  it("stages no auth and copies nothing back in native SSH mode", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-native-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const remoteHome = path.join(rootDir, "should-not-exist", "codex");
+    await mkdir(workspaceDir, { recursive: true });
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = path.join(rootDir, "controller-home");
+    try {
+      await runRemote({ remoteCredentials: "native" }, workspaceDir);
+      expect(syncDirectoryToSsh).not.toHaveBeenCalled();
+      expect(spawnedEnv().CODEX_HOME).toBeUndefined();
+      expect(runSshCommand).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("auth.json"),
+        expect.anything(),
+      );
+
+      vi.clearAllMocks();
+      await runRemote({ remoteCredentials: "native", env: { CODEX_HOME: remoteHome } }, workspaceDir);
+      expect(syncDirectoryToSsh).not.toHaveBeenCalled();
+      expect(spawnedEnv().CODEX_HOME).toBe(remoteHome);
+      await expect(readdir(path.dirname(remoteHome))).rejects.toThrow();
+    } finally {
+      if (previousHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousHome;
+    }
+  });
+
+  it("does not fail a successful SSH run when remote cleanup fails", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-cleanup-fail-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+    runChildProcess.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: [
+        JSON.stringify({ type: "thread.started", thread_id: "session-fresh" }),
+        JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }),
+      ].join("\n"),
+      stderr: "",
+      pid: 123,
+      startedAt: new Date().toISOString(),
+    });
+    runSshCommand.mockImplementation(async (_spec: unknown, command: string) => {
+      if (String(command).startsWith("rm ")) throw new Error("cleanup failed");
+      const missing = new Error("missing auth.json") as NodeJS.ErrnoException;
+      missing.code = "ENOENT";
+      throw missing;
+    });
+
+    await expect(runRemote({ env: { CODEX_HOME: codexHomeDir } }, workspaceDir)).resolves.toMatchObject({
+      exitCode: 0,
+    });
+    expect(runSshCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      "rm -rf -- '/remote/workspace/.paperclip-runtime/runs/run-native'",
+    );
   });
 
 });

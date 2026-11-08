@@ -960,6 +960,53 @@ describe("grok_local execute", () => {
       );
     });
 
+    it("stages no auth and sets no GROK_HOME in native SSH mode", async () => {
+      delete process.env.XAI_API_KEY;
+      const previousHome = process.env.GROK_HOME;
+      process.env.GROK_HOME = "/tmp/controller-grok-home";
+      mocks.state.isRemote = true;
+      const ctx = await makeCtx("run-remote-native", await makeTempRoot());
+      ctx.config.remoteCredentials = "native";
+      let seenEnv: Record<string, string> = {};
+      runProcessMock.mockImplementation(async (_runId, _target, _command, _args, options) => {
+        seenEnv = options.env;
+        return makeSuccessfulRunResult();
+      });
+
+      try {
+        await execute(ctx);
+        expect(prepareRuntimeMock).toHaveBeenCalledTimes(1);
+        expect((prepareRuntimeMock.mock.calls[0][0] as { assets?: unknown }).assets).toBeUndefined();
+        expect(seenEnv.GROK_HOME).toBeUndefined();
+
+        const remoteHome = "/home/user/.grok";
+        ctx.config.env = { GROK_HOME: remoteHome };
+        prepareRuntimeMock.mockClear();
+        await execute(ctx);
+        expect((prepareRuntimeMock.mock.calls[0][0] as { assets?: unknown }).assets).toBeUndefined();
+        expect(runProcessMock.mock.calls.at(-1)?.[4].env.GROK_HOME).toBe(remoteHome);
+      } finally {
+        if (previousHome === undefined) delete process.env.GROK_HOME;
+        else process.env.GROK_HOME = previousHome;
+      }
+    });
+
+    it("keeps the managed home asset when remoteCredentials is managed", async () => {
+      delete process.env.XAI_API_KEY;
+      mocks.state.isRemote = true;
+      await seedHostGrokAuth(JSON.stringify({ live: "token" }));
+      const ctx = await makeCtx("run-remote-managed-explicit", await makeTempRoot());
+      ctx.config.remoteCredentials = "managed";
+      runProcessMock.mockResolvedValue(makeSuccessfulRunResult());
+
+      await execute(ctx);
+
+      const { assets } = prepareRuntimeMock.mock.calls[0][0] as { assets?: Array<{ key: string; restore?: unknown }> };
+      expect(assets).toHaveLength(1);
+      expect(assets?.[0]?.key).toBe("home");
+      expect(typeof assets?.[0]?.restore).toBe("function");
+    });
+
     it("passes no home asset and sets no GROK_HOME in a remote API-key run", async () => {
       process.env.XAI_API_KEY = "test-key";
       mocks.state.isRemote = true;
