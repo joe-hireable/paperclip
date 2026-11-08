@@ -111,12 +111,35 @@ upstream 0240–0437, and skips plugin schema
   `preserves provider tool errors…` case now asserts `mcp_tool_error`
   instead of thrown `tool_error`.
 
-## Migrations
+## Full `pnpm test:run` vs `3381d56639` (Node v24.22.2)
 
-No new core DB migrations were added by this port. Drizzle keys Joe's
-0240–0247 SQL by content hash, so those files already sit at 0438–0445 on
-this branch. A database at the backup-branch schema already has those hashes
-applied; migrating to this head applies upstream 0240–0437 as new pending
-files. Plugin `plugin-shared-operations` migration `001_company_state.sql`
-(schema `plugin_shared_operations_6f6f8a1ee6`) is preserved. Do not
-re-CREATE that plugin table on a live instance that already has it.
+Both heads ran the same local `pnpm test:run` layout (chat shards, then
+serial general-server, then workspaces-a/b/c, then serialized). Local
+`run-vitest-stable` aborts a group on the first failed project, so remaining
+groups were continued separately after a general-server abort.
+
+Shared on both heads (timeouts, host git contention, missing `cursor-agent`,
+Cargo 1.83 / `edition2024`, missing runner linux-x64 daemon): workspace
+runtime/expiration/rehome/trust suites, `execution-workspaces-service`
+close-readiness, `plugin-runner-probe` / `native-usage-delivery`,
+`cursor-local-*`, adapter-utils git-workspace-sync 5s timeouts, and
+`company-portability` serialized git metadata.
+
+HEAD-only (port or fork-only, not timeouts):
+
+- `tool-gateway-service` Google Workspace preview: MCP `isError` now
+  returns `{ isError: true }` (`mcp_tool_error`) instead of throwing
+  `tool_error`. Intentional; 3381 still throws.
+- Fork-only coordinator files: `coordinator-delivery` (instruction-bundle
+  prompt wrap), `project-coordinator-intake` (404 vs 403), `redaction`
+  public `authorityDigest`.
+- `packages/db` snapshot drift: newest snapshot is still `0437_*`; Joe
+  tables live in `0438`–`0445`. Do not generate a new core migration.
+- CLI `worktree.test.ts`: `CREATE INDEX CONCURRENTLY` in Joe `0438`–`0445`
+  cannot run inside drizzle's migrate transaction. Live-switch remaps those
+  hashes and does not re-apply them. 3381 does not have those files.
+- UI AgentDetail crash on a missing binding snapshot is fixed on this head.
+
+Targeted fork-only execute-path suites on this head: coordinator 98/98,
+project-conversations 11/11, intelligent-routing-execution 32/32,
+MarkdownBody 60/60, live-switch throwaway DB 1/1.
