@@ -160,6 +160,21 @@ it("keeps the historical generic terminal-service error unclassified", () => {
   }, now)).toBeNull();
 });
 
+it("classifies a ChatGPT model rejection as adapter_model_unsupported", () => {
+  const title = "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.";
+  expect(classifyCodexTerminalSessionFailure({ category: "request", title }, now))
+    .toEqual({ errorCode: "adapter_model_unsupported", errorFamily: "configuration" });
+  expect(classifyCodexTerminalSessionFailure({
+    category: "request",
+    title: "Codex turn failed",
+    details: JSON.stringify({
+      type: "error",
+      status: 400,
+      error: { type: "invalid_request_error", code: "model_not_found", message: title },
+    }),
+  }, now)).toEqual({ errorCode: "adapter_model_unsupported", errorFamily: "configuration" });
+});
+
 it.each([
   "unexpected status 401 Unauthorized: Incorrect API key provided: sk-test...abcd., auth error code: invalid_api_key",
   "Incorrect API key provided",

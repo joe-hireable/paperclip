@@ -27,6 +27,13 @@ describe("classifyAdapterFailureForRecovery", () => {
     expect(classifyContinuationFailure(unknown as never).kind).toBe("transient_infra");
     expect(isConfigurationIncompleteFailedRun(unknown)).toBe(false);
   });
+
+  it("waits for model configuration changes instead of retrying adapter_model_unsupported", () => {
+    const run = { errorCode: "adapter_model_unsupported", error: "The selected model is not supported.", resultJson: null };
+    expect(classifyAdapterFailureForRecovery(run)).toEqual({ kind: "configuration_incomplete" });
+    expect(classifyContinuationFailure(run as never)).toMatchObject({ kind: "non_retryable", maxAttempts: 0 });
+    expect(isConfigurationIncompleteFailedRun(run)).toBe(true);
+  });
   it("retries a continuation whose host lost the controller lease before dispatch", () => {
     expect(classifyContinuationFailure({ errorCode: "controller_lease_lost", error: "Legacy controller lease lost", resultJson: null } as never))
       .toMatchObject({ kind: "transient_infra", maxAttempts: 3 });

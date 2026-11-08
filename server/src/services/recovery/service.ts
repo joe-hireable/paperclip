@@ -541,6 +541,7 @@ const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
 const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
   "project_access_denied",
   "native_provider_model_rejected",
+  "adapter_model_unsupported",
   "provider_tool_definition_invalid",
   "adapter_engine_unavailable",
   "agent_not_invokable",
@@ -612,7 +613,7 @@ export function classifyAdapterFailureForRecovery(
 ): AdapterFailureRecoveryClassification {
   // An engine prerequisite cannot be repaired by asking the same unavailable
   // engine to retry. Use the existing configuration-blocker path.
-  if (latestRun.errorCode === "adapter_engine_unavailable" || latestRun.errorCode === "provider_tool_definition_invalid" || latestRun.errorCode === "native_provider_model_rejected") {
+  if (latestRun.errorCode === "adapter_engine_unavailable" || latestRun.errorCode === "provider_tool_definition_invalid" || latestRun.errorCode === "native_provider_model_rejected" || latestRun.errorCode === "adapter_model_unsupported") {
     return { kind: "configuration_incomplete" };
   }
   if (

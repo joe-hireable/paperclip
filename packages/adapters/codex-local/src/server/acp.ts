@@ -40,7 +40,11 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { createWorkspaceRestoreTeardown } from "@paperclipai/adapter-utils/workspace-restore-teardown";
 import { normalizeCodexModel } from "../index.js";
-import { classifyCodexAuthRefreshFailure, extractCodexRetryNotBefore } from "./parse.js";
+import {
+  classifyCodexAuthRefreshFailure,
+  classifyCodexProviderApiError,
+  extractCodexRetryNotBefore,
+} from "./parse.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
   buildCodexHomeRefreshProvision,
@@ -285,6 +289,16 @@ export function classifyCodexTerminalSessionFailure(
     return CODEX_MODEL_CAPACITY_RE.test(text)
       ? { errorCode: "codex_transient_upstream", errorFamily: "transient_upstream" }
       : null;
+  }
+  const providerApiError = classifyCodexProviderApiError({
+    errorMessage: [failure.title, failure.details].filter(Boolean).join("\n"),
+    stderr: [failure.title, failure.details].filter(Boolean).join("\n"),
+  });
+  if (
+    providerApiError?.errorCode === "adapter_model_unsupported" ||
+    providerApiError?.errorCode === "adapter_provider_http_error"
+  ) {
+    return { errorCode: providerApiError.errorCode, errorFamily: providerApiError.errorFamily };
   }
   // ACP's `limit` also covers context, turn, rate and configured budget limits.
   // Require explicit usage exhaustion; the CLI's broader capacity matcher would

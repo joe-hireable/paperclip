@@ -1,3 +1,4 @@
+import { redactDiagnosticText } from "@paperclipai/adapter-utils";
 import {
   asString,
   parseObject,
@@ -25,6 +26,170 @@ export type CodexAuthRefreshFailureClass =
   | "refresh_token_reused"
   | "refresh_token_expired"
   | "refresh_token_invalidated";
+
+export const ADAPTER_MODEL_UNSUPPORTED_CODE = "adapter_model_unsupported";
+export const ADAPTER_AUTH_FAILED_CODE = "adapter_auth_failed";
+export const ADAPTER_PROVIDER_HTTP_ERROR_CODE = "adapter_provider_http_error";
+
+export type CodexProviderApiErrorClass = {
+  errorCode:
+    | typeof ADAPTER_MODEL_UNSUPPORTED_CODE
+    | typeof ADAPTER_AUTH_FAILED_CODE
+    | typeof ADAPTER_PROVIDER_HTTP_ERROR_CODE;
+  errorFamily: "configuration";
+  errorMessage: string;
+  httpStatus: number | null;
+};
+
+const CODEX_CHATGPT_MODEL_REJECTION_RE =
+  /The '([^']+)' model is not supported when using Codex with a ChatGPT account\./;
+const CODEX_MODEL_UNAVAILABLE_RE =
+  /model[^\n]{0,120}(?:does not exist|not found|not supported)/i;
+const CODEX_PROVIDER_AUTH_RE =
+  /\b(?:401 unauthorized|invalid_api_key|(?:incorrect|invalid) api key)\b/i;
+const CODEX_PROTOCOL_NON_ERROR_TYPES = new Set([
+  "item.completed",
+  "item.started",
+  "item.updated",
+  "thread.started",
+  "turn.started",
+  "turn.completed",
+]);
+
+function readHttpStatus(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+    ? value
+    : null;
+}
+
+function readCodexNestedErrorMessage(event: Record<string, unknown>): string {
+  const nested = parseObject(event.error);
+  return asString(event.message, "").trim() || asString(nested.message, "").trim();
+}
+
+function redactCodexProviderErrorMessage(message: string): string {
+  return redactDiagnosticText(message).replace(/\s+/g, " ").trim().slice(0, 1000);
+}
+
+function readCodexProviderErrorRecord(value: unknown): {
+  status: number | null;
+  code: string;
+  message: string;
+} | null {
+  const obj = parseObject(value);
+  if (Object.keys(obj).length === 0) return null;
+  const type = asString(obj.type, "");
+  if (CODEX_PROTOCOL_NON_ERROR_TYPES.has(type)) return null;
+  const nested = parseObject(obj.error);
+  const nestedType = asString(nested.type, "");
+  const status = readHttpStatus(obj.status) ?? readHttpStatus(nested.status);
+  const code = asString(nested.code, "") || asString(obj.code, "") || nestedType;
+  const message = readCodexNestedErrorMessage(obj);
+  const looksLikeHttpError =
+    (status != null && status >= 400) ||
+    type === "error" ||
+    type === "turn.failed" ||
+    type === "invalid_request_error" ||
+    nestedType === "invalid_request_error" ||
+    code === "model_not_found" ||
+    code === "invalid_api_key";
+  if (!looksLikeHttpError) return null;
+  if (!message && status == null && !code) return null;
+  if (type === "turn.failed" && Object.keys(nested).length > 0) {
+    return readCodexProviderErrorRecord(nested) ?? { status, code, message };
+  }
+  return { status, code, message };
+}
+
+function extractCodexProviderErrorRecords(text: string) {
+  const records: Array<{ status: number | null; code: string; message: string }> = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^ERROR:\s*/i, "");
+    if (!line) continue;
+    const fromLine = readCodexProviderErrorRecord(parseJson(line));
+    if (fromLine) records.push(fromLine);
+    const start = line.indexOf("{");
+    if (start > 0) {
+      const fromEmbedded = readCodexProviderErrorRecord(parseJson(line.slice(start)));
+      if (fromEmbedded) records.push(fromEmbedded);
+    }
+  }
+  return records;
+}
+
+function classifyCodexProviderErrorRecord(record: {
+  status: number | null;
+  code: string;
+  message: string;
+}): CodexProviderApiErrorClass | null {
+  const errorMessage = redactCodexProviderErrorMessage(record.message || record.code);
+  if (!errorMessage) return null;
+  if (
+    record.code === "model_not_found" ||
+    CODEX_CHATGPT_MODEL_REJECTION_RE.test(record.message) ||
+    CODEX_MODEL_UNAVAILABLE_RE.test(record.message)
+  ) {
+    return {
+      errorCode: ADAPTER_MODEL_UNSUPPORTED_CODE,
+      errorFamily: "configuration",
+      errorMessage,
+      httpStatus: record.status,
+    };
+  }
+  if (
+    record.status === 401 ||
+    record.code === "invalid_api_key" ||
+    record.code === "unauthorized" ||
+    CODEX_PROVIDER_AUTH_RE.test(record.message)
+  ) {
+    return {
+      errorCode: ADAPTER_AUTH_FAILED_CODE,
+      errorFamily: "configuration",
+      errorMessage,
+      httpStatus: record.status ?? 401,
+    };
+  }
+  if (
+    record.status != null &&
+    record.status >= 400 &&
+    record.status < 500 &&
+    record.status !== 408 &&
+    record.status !== 429
+  ) {
+    return {
+      errorCode: ADAPTER_PROVIDER_HTTP_ERROR_CODE,
+      errorFamily: "configuration",
+      errorMessage,
+      httpStatus: record.status,
+    };
+  }
+  return null;
+}
+
+export function classifyCodexProviderApiError(input: {
+  stdout?: string | null;
+  stderr?: string | null;
+  errorMessage?: string | null;
+}): CodexProviderApiErrorClass | null {
+  const records = [
+    ...extractCodexProviderErrorRecords(input.stdout ?? ""),
+    ...extractCodexProviderErrorRecords(input.stderr ?? ""),
+    ...extractCodexProviderErrorRecords(input.errorMessage ?? ""),
+  ];
+  for (const record of records) {
+    const classified = classifyCodexProviderErrorRecord(record);
+    if (classified) return classified;
+  }
+  const surface = [input.stderr ?? "", input.errorMessage ?? ""].join("\n");
+  const match = CODEX_CHATGPT_MODEL_REJECTION_RE.exec(surface);
+  if (!match) return null;
+  return {
+    errorCode: ADAPTER_MODEL_UNSUPPORTED_CODE,
+    errorFamily: "configuration",
+    errorMessage: redactCodexProviderErrorMessage(match[0]),
+    httpStatus: 400,
+  };
+}
 
 export function parseCodexJsonl(stdout: string) {
   return createCodexJsonlParser()(stdout);
@@ -76,7 +241,7 @@ export function createCodexJsonlParser() {
       }
 
       if (type === "error") {
-        const msg = asString(event.message, "").trim();
+        const msg = readCodexNestedErrorMessage(event);
         if (msg) errorMessage = msg;
         continue;
       }
@@ -91,8 +256,7 @@ export function createCodexJsonlParser() {
       }
 
       if (type === "turn.failed") {
-        const err = parseObject(event.error);
-        const msg = asString(err.message, "").trim();
+        const msg = readCodexNestedErrorMessage(parseObject(event.error)) || readCodexNestedErrorMessage(event);
         if (msg) errorMessage = msg;
       }
     }

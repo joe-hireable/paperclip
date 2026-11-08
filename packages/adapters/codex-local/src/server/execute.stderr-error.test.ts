@@ -78,16 +78,20 @@ vi.mock("./runtime-config.js", async () => {
 
 import { execute, firstMeaningfulStderrLine } from "./execute.js";
 
-function mockFailedProcess(stderr: string) {
+function mockProcess(input: { exitCode?: number; stdout?: string; stderr: string }) {
   runAdapterExecutionTargetProcess.mockImplementation(async () => ({
-    exitCode: 1,
+    exitCode: input.exitCode ?? 1,
     signal: null,
     timedOut: false,
-    stdout: "",
-    stderr,
+    stdout: input.stdout ?? "",
+    stderr: input.stderr,
     pid: 123,
     startedAt: new Date().toISOString(),
   }));
+}
+
+function mockFailedProcess(stderr: string) {
+  mockProcess({ stderr });
 }
 
 function buildContext(config: Record<string, unknown> = {}) {
@@ -132,8 +136,47 @@ describe("codex_local stderr fallback error derivation", () => {
     const result = await execute(buildContext() as never);
 
     expect(result.exitCode).toBe(1);
-    expect(result.errorMessage).toContain("model_not_found");
+    expect(result.errorCode).toBe("adapter_model_unsupported");
+    expect(result.errorFamily).toBe("configuration");
+    expect(result.errorMessage).toContain("does not exist");
     expect(result.errorMessage).not.toContain("YOLO mode");
+  });
+
+  it("fails a 400 model_not_found turn even when Codex exits 0 after a metadata warning", async () => {
+    const chatgptRejection =
+      "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.";
+    mockProcess({
+      exitCode: 0,
+      stderr: [
+        YOLO_WARNING,
+        "WARNING: Model metadata for `gpt-5.1-codex` not found",
+        `ERROR: ${JSON.stringify({
+          type: "error",
+          status: 400,
+          error: { type: "invalid_request_error", code: "model_not_found", message: chatgptRejection },
+        })}`,
+      ].join("\n"),
+    });
+
+    const result = await execute(buildContext() as never);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("adapter_model_unsupported");
+    expect(result.errorFamily).toBe("configuration");
+    expect(result.errorMessage).toBe(chatgptRejection);
+  });
+
+  it("keeps a metadata-warning-only exit 0 as success", async () => {
+    mockProcess({
+      exitCode: 0,
+      stderr: `${YOLO_WARNING}\nWARNING: Model metadata for \`gpt-5.1-codex\` not found\n`,
+    });
+
+    const result = await execute(buildContext() as never);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errorCode).toBeNull();
+    expect(result.errorMessage).toBeNull();
   });
 
   it("skips adapter-injected [paperclip] diagnostic lines when picking the fallback error", async () => {
