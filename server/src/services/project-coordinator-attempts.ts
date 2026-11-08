@@ -242,12 +242,18 @@ async function assertPreparedWorkspace(
     )
     .for("share");
   const metadata = { ...(execution?.metadata ?? {}) };
-  // The same four native realization outputs are excluded by the routing fingerprint.
+  // Native realization outputs are excluded by the routing fingerprint. The
+  // 0313 privacy trigger also stamps `_issuePrivacySources` on every insert.
   for (const key of [
     "workspaceRealization",
     "workspaceRealizationRequest",
     "source",
     "createdByRuntime",
+    "_issuePrivacySources",
+    "lifecycleGeneration",
+    "gitBranchOwnershipVersion",
+    "baseRefSnapshot",
+    "configFingerprint",
   ])
     delete metadata[key];
   if (
@@ -979,6 +985,7 @@ async function createSpecialistHandoff(
     sourceTrust: source.intake.sourceTrust,
     allowDuplicate: true,
     skipExecutionWorkspaceInheritance: true,
+    parentDepthPolicy: "allow_nested",
   });
   const execution = await executionWorkspaceService(db).create({
     id: workspacePins.executionWorkspaceId,
@@ -1820,6 +1827,7 @@ export function projectCoordinatorAttemptService(db: Db) {
           actorResponsibleUserId: actor.userId,
           sourceTrust: intake.sourceTrust,
           allowDuplicate: true,
+          parentDepthPolicy: "allow_nested",
         });
         const execution = await executionWorkspaceService(reader).create({
           id: workspacePins.executionWorkspaceId,

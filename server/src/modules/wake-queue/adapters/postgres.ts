@@ -30,6 +30,7 @@ import {
   issueRelations,
   issues,
   nativeRunFinalizations,
+  runExecutionBindings,
 } from "@paperclipai/db";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { legacyExecutionNeedsReconciliationWithEvidence } from "../../../services/legacy-execution-recovery.js";
@@ -564,6 +565,19 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
             agentId ? eq(heartbeatRuns.agentId, agentId) : sql`true`,
           ),
         )
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      return row !== null;
+    },
+
+    async hasBoundExecutionAttempt({ companyId, runId }) {
+      const row = await tx
+        .select({ runId: runExecutionBindings.runId })
+        .from(runExecutionBindings)
+        .where(and(
+          eq(runExecutionBindings.companyId, companyId),
+          eq(runExecutionBindings.runId, runId),
+        ))
         .limit(1)
         .then((rows) => rows[0] ?? null);
       return row !== null;
@@ -1255,11 +1269,21 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           run.runtimeModeResolvedAt === null && run.startedAt === null && run.processStartedAt === null &&
           run.processPid === null && run.processGroupId === null &&
           cancellation?.source === "operator" && cancellation.expected;
+        const boundAttempt = await tx
+          .select({ runId: runExecutionBindings.runId })
+          .from(runExecutionBindings)
+          .where(and(
+            eq(runExecutionBindings.companyId, input.companyId),
+            eq(runExecutionBindings.runId, run.id),
+          ))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
         const preDrainFacts: PreDrainFacts = {
           issueRowPresent: issueRow !== null,
           executionRunIdMatchesRun: !issueRow || !issueRow.executionRunId || issueRow.executionRunId === run.id,
           isWorkspaceValidationFailedRun: isWorkspaceValidationFailedRun(run),
           isConfigurationIncompleteFailedRun: isConfigurationIncompleteFailedRun(run),
+          hasBoundExecutionAttempt: boundAttempt !== null,
           issueStatus: issueRow?.status ?? "",
           hasAssigneeUser: Boolean(issueRow?.assigneeUserId),
           assigneeAgentMatchesRunAgent: issueRow?.assigneeAgentId === run.agentId,
@@ -1315,7 +1339,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
             outcome: {
               kind: "blocked",
               issue: toIssueSnapshot(issueRow),
-              previousStatus: issueRow.status as "todo" | "in_progress",
+              previousStatus: issueRow.status as "todo" | "in_progress" | "in_review",
               noticeKind: preDrain.noticeKind,
             },
             postCommitEffects: [],

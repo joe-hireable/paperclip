@@ -161,6 +161,8 @@ export interface HeartbeatWorkspacePreparationInput {
   };
   controllerLease: Pick<ReturnType<typeof watchLegacyControllerLease>, "assertOwned">;
   nativeRunnerPreparationSpans: NativeRunHistoricalSpan[];
+  /** Bound intelligent-routing receipts qualify a fixed role cwd; do not stamp issue workspace fields after acquire. */
+  skipIssueWorkspaceBinding?: boolean;
 }
 
 function readNonEmptyString(value: unknown): string | null {
@@ -879,7 +881,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   const bindIssueToPersistedExecutionWorkspace = async (
     workspace: ExecutionWorkspace | null,
   ) => {
-    if (controllerOnly || !issueId || !workspace || nativeRecoveryExecutionWorkspaceId) {
+    if (controllerOnly || !issueId || !workspace || nativeRecoveryExecutionWorkspaceId || input.skipIssueWorkspaceBinding) {
       return;
     }
     const nextIssueWorkspaceMode =
@@ -998,7 +1000,9 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     pendingForwardBranchReconcile?.recordedBranchName ??
     executionWorkspace.branchName;
   try {
-    if (remoteAuthority) {
+    if (input.skipIssueWorkspaceBinding) {
+      persistedExecutionWorkspace = reusableExistingExecutionWorkspace ?? persistedExecutionWorkspace;
+    } else if (remoteAuthority) {
       if (!remoteSourceState.value || !issueId) throw new Error("remote_workspace_source_missing");
       if (!selectedEnvironmentId) throw new Error("remote_workspace_environment_missing");
       await assertRemotePreparationOwned();
@@ -1183,7 +1187,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   const projectRepositoryPaths: string[] = [];
   if (remoteAuthority) projectRepositoryPaths.push(...(remoteSourceState.value?.source.repositories ?? [])
     .filter(repository => !repository.readOnly).map(repository => repository.relativePath));
-  if (!pluginPrepared && !pluginTaskWorkspace && !remoteAuthority && !controllerOnly && persistedExecutionWorkspace && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId) {
+  if (!pluginPrepared && !pluginTaskWorkspace && !remoteAuthority && !controllerOnly && persistedExecutionWorkspace && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId && !input.skipIssueWorkspaceBinding) {
     const taskRepositories = await timeWorkspace("workspace_repository_admission", () =>
       executionWorkspacesSvc.prepareTaskRepositoriesForAdmission({ companyId: agent.companyId,
         issueId, workspaceId: persistedExecutionWorkspace!.id, cwd: executionWorkspace.cwd,

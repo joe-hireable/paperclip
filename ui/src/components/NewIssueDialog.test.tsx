@@ -983,7 +983,7 @@ describe("NewIssueDialog", () => {
     const qualify = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Qualify fixture execution")!;
     await act(async () => qualify.click());
     expect(container.textContent).not.toContain("Model lane");
-    await act(async () => Array.from(container.querySelectorAll("button")).find(button => button.textContent?.includes("Create Task"))!.click());
+    await act(async () => Array.from(container.querySelectorAll("button")).find(button => button.getAttribute("aria-label") === "Create task")!.click());
     await flush();
     expect(mockIssuesApi.create).toHaveBeenCalledWith("company-1", expect.objectContaining({ status: "backlog", projectWorkspaceId: "workspace-1", assigneeAdapterOverrides: { executionBinding: boundSelection, useProjectWorkspace: true } }));
     act(() => root.unmount());

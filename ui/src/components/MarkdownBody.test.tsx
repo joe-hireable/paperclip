@@ -64,7 +64,7 @@ afterEach(() => {
 
 function renderMarkdown(
   children: string,
-  seededIssues: Array<{ identifier: string; status: string; title?: string; cacheKey?: string }> = [],
+  seededIssues: Array<{ id?: string; identifier: string; status: string; title?: string; cacheKey?: string }> = [],
   props: Partial<ComponentProps<typeof MarkdownBody>> = {},
 ) {
   const queryClient = new QueryClient({
@@ -76,8 +76,8 @@ function renderMarkdown(
   });
 
   for (const issue of seededIssues) {
-    queryClient.setQueryData(queryKeys.issues.detail(issue.cacheKey ?? issue.identifier), {
-      id: issue.identifier,
+    queryClient.setQueryData(queryKeys.issues.detail(issue.cacheKey ?? issue.id ?? issue.identifier), {
+      id: issue.id ?? issue.identifier,
       identifier: issue.identifier,
       status: issue.status,
       title: issue.title,
@@ -333,14 +333,13 @@ describe("MarkdownBody", () => {
     expect(html).not.toContain('data-mention-pending="true"');
   });
 
-  // PORT-DEFERRED: Joe's UUID issue-link resolution is not in upstream MarkdownBody; see doc/port-notes.
-  it.skip.each([
+  it.each([
     ["/issues/78fcb660-ab9d-477a-b3e8-b1b417d58115#document-coordinator-result", "#document-coordinator-result"],
     ["/issues/78fcb660-ab9d-477a-b3e8-b1b417d58115?view=full", "?view=full"],
     ["/PAP/issues/78fcb660-ab9d-477a-b3e8-b1b417d58115?view=full&focus=1#document-coordinator-result", "?view=full&amp;focus=1#document-coordinator-result"],
   ])("preserves issue-link query and fragment when resolving %s", (href, suffix) => {
     const html = renderMarkdown(`[Coordinator result](${href})`, [
-      { id: "78fcb660-ab9d-477a-b3e8-b1b417d58115", identifier: "PAP-16", status: "in_review" } as never,
+      { id: "78fcb660-ab9d-477a-b3e8-b1b417d58115", identifier: "PAP-16", status: "in_review" },
     ]);
 
     expect(html).toContain(`href="/issues/PAP-16${suffix}"`);

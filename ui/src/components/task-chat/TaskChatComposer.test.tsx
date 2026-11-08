@@ -2063,38 +2063,35 @@ describe("TaskChatComposer", () => {
     ).not.toBeNull();
   });
 
-  // PORT-DEFERRED(master-intake UI): see doc/port-notes; {...({ masterIntake: true } as {})} prop not wired on upstream component yet.
-  it.skip("master intake never infers reopen or reassignment", async () => {
+  it("master intake never infers reopen or reassignment", async () => {
     const onAdd = vi.fn(async () => {});
-    render(<TaskChatComposer onAdd={onAdd} workMode="standard" {...({ masterIntake: true } as {})}
+    render(<TaskChatComposer onAdd={onAdd} workMode="standard" masterIntake
       issueStatus="done" currentAssigneeValue="agent:a1" enableReassign
       reassignOptions={[{ id: "agent:a1", label: "Agent" }]} />);
     typeText("A project thought");
     pressKey("Enter", { metaKey: true });
     await flushAsync();
-    expect(onAdd).toHaveBeenCalledWith("A project thought", undefined, undefined);
+    expect(onAdd).toHaveBeenCalledWith("A project thought", undefined, undefined, undefined, expect.any(String));
     expect(container.querySelector('[role="combobox"]')).toBeNull();
   });
 
-  // PORT-DEFERRED(master-intake UI): see doc/port-notes; {...({ masterIntake: true } as {})} prop not wired on upstream component yet.
-  it.skip("keeps a master pending envelope separate from a newer draft on ambiguous failure", async () => {
+  it("keeps a master pending envelope separate from a newer draft on ambiguous failure", async () => {
     let reject!: (error: Error) => void;
     const onAdd = vi.fn().mockReturnValue(new Promise<void>((_resolve, fail) => { reject = fail; }));
-    render(<TaskChatComposer onAdd={onAdd} workMode="standard" {...({ masterIntake: true } as {})} draftKey="master-draft" />);
+    render(<TaskChatComposer onAdd={onAdd} workMode="standard" masterIntake draftKey="master-draft" />);
     typeText("submitted original"); pressKey("Enter", { metaKey: true }); await flushAsync();
     typeText("separate next draft"); reject(new PendingIntakeError("response lost")); await flushAsync(); await flushAsync();
     expect(editable().textContent).toBe("separate next draft");
     expect(onAdd).toHaveBeenCalledTimes(1);
   });
 
-  // PORT-DEFERRED(master-intake UI): see doc/port-notes; {...({ masterIntake: true } as {})} prop not wired on upstream component yet.
-  it.skip("removes an attachment already retained in the master envelope after an ambiguous send", async () => {
+  it("removes an attachment already retained in the master envelope after an ambiguous send", async () => {
     const onAdd = vi.fn().mockRejectedValue(new PendingIntakeError("response lost"));
     const onAttachImage = vi.fn().mockResolvedValue({ contentPath: "/attachments/notes.txt", originalFilename: "notes.txt" });
-    render(<TaskChatComposer onAdd={onAdd} workMode="standard" {...({ masterIntake: true } as {})} onAttachImage={onAttachImage} />);
+    render(<TaskChatComposer onAdd={onAdd} workMode="standard" masterIntake onAttachImage={onAttachImage} />);
     typeText("Original"); pasteFiles([new File(["plain"], "notes.txt", { type: "text/plain" })]); await flushAsync();
     pressKey("Enter", { metaKey: true }); await flushAsync(); await flushAsync();
-    expect(onAdd).toHaveBeenCalledWith("Original\n\n[notes.txt](/attachments/notes.txt)", undefined, undefined);
+    expect(onAdd).toHaveBeenCalledWith("Original\n\n[notes.txt](/attachments/notes.txt)", undefined, undefined, undefined, expect.any(String));
     expect(container.querySelector('[data-testid="task-chat-composer-attachments"]')?.textContent ?? "").not.toContain("notes.txt");
   });
 

@@ -39,6 +39,8 @@ import { queryKeys } from "../../lib/queryKeys";
 import { ACCOUNT_BOUND_MODEL_DISCOVERY_QUERY_OPTIONS, nativeTaskModelCatalogOptions } from "../../lib/native-model-catalog";
 import { buildCompanyUserInlineOptions, buildCompanyUserLabelMap, buildCompanyUserProfileMap, isAgentTaskTarget } from "../../lib/company-members";
 import { ISSUE_OVERRIDE_ADAPTER_TYPES, type IssueModelLane } from "../../lib/issue-assignee-overrides";
+import { ExecutionBindingSelector } from "../ExecutionBindingSelector";
+import { boundTaskOverrides, bindingInvalidationPatch, requiresTaskBinding } from "../../lib/execution-binding-task";
 import { useProjectOrder } from "../../hooks/useProjectOrder";
 import {
   getRecentAssigneeIds,
@@ -202,7 +204,7 @@ interface IssuePropertiesProps {
   childIssues?: Issue[];
   issueLinkState?: unknown;
   onAddSubIssue?: () => void;
-  onUpdate: (data: Record<string, unknown>) => void;
+  onUpdate: (data: Record<string, unknown>) => void | Promise<unknown>;
   inline?: boolean;
   /** Whether an agent run is currently in flight on this issue, so the assignee
    * picker can warn that reassigning will interrupt it. */
@@ -245,7 +247,7 @@ export function IssueProperties({
   childIssues = [],
   issueLinkState,
   onAddSubIssue,
-  onUpdate,
+  onUpdate: persistUpdate,
   inline,
   hasActiveRun = false,
   externalObjects,
@@ -258,6 +260,7 @@ export function IssueProperties({
   sidePanelContentOnly = false,
   contextUsage,
 }: IssuePropertiesProps) {
+  const onUpdate = (data: Record<string, unknown>) => persistUpdate(bindingInvalidationPatch(issue, data));
   const policyResult = useExecutionPolicy(issue.executionPolicy);
   const policyAvailable = policyResult.success;
   const executionPolicy = policyResult.success ? policyResult.data : null;
@@ -757,9 +760,10 @@ export function IssueProperties({
   const nativeCatalog = nativeTaskModelCatalogOptions(assignee);
   const assigneeAdapterType = assignee?.adapterType ?? null;
   const assigneeAdapterOverrides = issue.assigneeAdapterOverrides ?? null;
-  const showAssigneeAdapterOptions = assigneeAdapterOverrides !== null;
+  const bindingRequired = requiresTaskBinding(assignee) || Boolean(assigneeAdapterOverrides?.executionBinding);
+  const showAssigneeAdapterOptions = !bindingRequired && assigneeAdapterOverrides !== null;
   const supportsAssigneeOverrides = Boolean(
-    assigneeAdapterType && (ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType) || nativeCatalog),
+    !bindingRequired && assigneeAdapterType && (ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType) || nativeCatalog),
   );
   const assigneeOverrideLane = overrideLane(assigneeAdapterOverrides);
   const assigneeOverrideAdapterConfig = asRecord(assigneeAdapterOverrides?.adapterConfig);
@@ -2406,6 +2410,21 @@ export function IssueProperties({
         >
           {assigneeContent}
         </PropertyPicker>
+
+        {bindingRequired && companyId && issue.assigneeAgentId ? (
+          <ExecutionBindingSelector
+            key={JSON.stringify([issue.id, issue.assigneeAgentId, issue.projectId, issue.projectWorkspaceId, issue.title, issue.description])}
+            companyId={companyId}
+            agentId={issue.assigneeAgentId}
+            contextKey={JSON.stringify([issue.id, issue.assigneeAgentId, issue.projectId, issue.projectWorkspaceId, issue.title, issue.description])}
+            value={assigneeAdapterOverrides?.executionBinding}
+            disabled={hasActiveRun || !issue.projectId || !issue.projectWorkspaceId || hideHostPaths}
+            onSelect={(selection) => onUpdate({
+              assigneeAdapterOverrides: selection ? boundTaskOverrides(selection) : null,
+              status: "backlog",
+            })}
+          />
+        ) : null}
 
         {showAssigneeAdapterOptions ? (
           <PropertyPicker

@@ -79,6 +79,7 @@ export interface HeartbeatExecutionConfigurationInput {
     "trustPreset" | "useIsolatedTaskDirectory" | "requestedExecutionWorkspaceMode"> & { explicitTaskDirectory: boolean };
   environment: Pick<EnvironmentSelection,
     "selectedEnvironmentId" | "selectedEnvironmentForConfig" | "resolvedInstanceSettings" | "persistedNativeExecutionInput">;
+  executionBinding?: import("@paperclipai/shared/execution-bindings").ExecutionBindingSnapshot | null;
   services: {
     secretsSvc: Parameters<typeof resolveExecutionRunAdapterConfig>[0]["secretsSvc"];
     companySkills: Pick<ReturnType<typeof companySkillService>, "withRuntimeSkillEntries">;
@@ -184,6 +185,7 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
 
   const { resolvedConfig, configuredTaskEnvironment, secretKeys, secretManifest } =
     await time("configuration_secrets", () => resolveExecutionRunAdapterConfig({
+      executionBinding: input.executionBinding,
       managedAiCredentials: Boolean(aiBinding),
       managedGitHubCredentials: !useHostGitHub,
       companyId: agent.companyId,
@@ -361,7 +363,8 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
       throw error;
     }
   };
-  const skillsPreparation = (preconfiguredHome ? Promise.resolve([]) : time("configuration_skills", prepareSkills))
+  const skipRuntimeSkillMaterialization = preconfiguredHome || Boolean(input.executionBinding?.routingReceipt);
+  const skillsPreparation = (skipRuntimeSkillMaterialization ? Promise.resolve([]) : time("configuration_skills", prepareSkills))
     .finally(() => { skillsPrepareEndedAtMs = Date.now(); });
   const assignmentsPreparation = preconfiguredHome ? Promise.resolve([]) : time("configuration_connector_assignments", () => resolveConnectorAssignments(db, { companyId: agent.companyId, agentId: agent.id, runId: run.id, issueId: typeof context.issueId === "string" ? context.issueId : undefined }));
   const [preparedSkills, preparedAssignments, preparedInstructions] = await Promise.allSettled([
@@ -413,6 +416,9 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   }
   onIdentityRedactorPrepared(identityRedactor);
   if (agentIdentity) secretKeys.add("PAPERCLIP_AGENT_PRIVATE_KEY");
+  if (input.executionBinding?.routingReceipt) {
+    runtimeConfig = { ...runtimeConfig, paperclipRuntimeSkills: [] };
+  }
   return {
     prepared: true as const,
     mergedConfig, configSnapshot, runScopedMentionedSkillKeys, githubSelection, useHostGitHub,

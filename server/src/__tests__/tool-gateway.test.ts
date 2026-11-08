@@ -644,9 +644,9 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         content: [{ type: "text", text: "Search denied: outside consented tag" }], isError: true,
       });
       expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, company.id)))
-        .toEqual([expect.objectContaining({ status: "failed", errorCode: "tool_error" })]);
+        .toEqual([expect.objectContaining({ status: "failed", errorCode: "mcp_tool_error" })]);
       const events = await db.select().from(toolCallEvents).where(eq(toolCallEvents.companyId, company.id));
-      expect(events).toContainEqual(expect.objectContaining({ eventType: "call_failed", outcome: "failure", reasonCode: "tool_error" }));
+      expect(events).toContainEqual(expect.objectContaining({ eventType: "call_failed", outcome: "failure", reasonCode: "mcp_tool_error" }));
       expect(events.some((event) => event.eventType === "call_completed")).toBe(false);
       const agent = await createAgent(db, company.id);
       await allowAllToolsForAgent(db, company.id, agent.id);
@@ -654,9 +654,9 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         principalId: "test-user", status: "active", membershipRole: "member" });
       const testCall = await gateway.executeTestCall({ companyId: company.id, connectionId: connection.id,
         agentId: agent.id, userId: "test-user", toolName, parameters: {} });
-      expect(testCall).toMatchObject({ decision: "allowed", error: { reasonCode: "tool_error" } });
+      expect(testCall).toMatchObject({ decision: "allowed", error: { reasonCode: "mcp_tool_error" } });
       expect(await db.select().from(toolInvocations).where(eq(toolInvocations.id, testCall.invocationId)))
-        .toEqual([expect.objectContaining({ status: "failed", errorCode: "tool_error" })]);
+        .toEqual([expect.objectContaining({ status: "failed", errorCode: "mcp_tool_error" })]);
       const testEvents = await db.select().from(toolCallEvents).where(eq(toolCallEvents.invocationId, testCall.invocationId));
       expect(testEvents.some(event => event.eventType === "call_failed")).toBe(true);
       expect(testEvents.some(event => event.eventType === "call_completed")).toBe(false);

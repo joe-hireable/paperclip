@@ -70,6 +70,8 @@ describe("execution binding run details", () => {
 
   it("distinguishes no binding from a failed lookup, including a stale cached record", () => {
     expect(renderToStaticMarkup(<ExecutionBindingRunDetails record={null} runStatus="failed" loading={false} failed={false} />)).toBe("");
+    expect(renderToStaticMarkup(<ExecutionBindingRunDetails record={[] as never} runStatus="succeeded" loading={false} failed={false} />)).toBe("");
+    expect(renderToStaticMarkup(<ExecutionBindingRunDetails record={{ releasedAt: null, releaseReason: null } as never} runStatus="succeeded" loading={false} failed={false} />)).toBe("");
     const html = renderToStaticMarkup(<ExecutionBindingRunDetails record={{ ...record, releasedAt: new Date() }} runStatus="failed" loading={false} failed />);
     expect(html).toContain("Could not verify the account reservation");
     expect(html).not.toContain("Account reservation released");

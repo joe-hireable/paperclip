@@ -8,7 +8,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import {
   agents,
+  authUsers,
   companies,
+  companyMemberships,
   createDb,
   documents,
   executionBindings,
@@ -54,6 +56,14 @@ describeDb(
         "intelligent-routing-execution-",
       );
       db = createDb(database.connectionString);
+      await db.insert(authUsers).values({
+        id: "synthetic-board",
+        name: "Synthetic Board",
+        email: "synthetic-board@example.test",
+        emailVerified: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }).onConflictDoNothing();
     }, 30_000);
     afterAll(async () => {
       await database?.cleanup();
@@ -82,6 +92,13 @@ describeDb(
           defaultResponsibleUserId: "synthetic-board",
         })
         .returning();
+      await db.insert(companyMemberships).values({
+        companyId: company!.id,
+        principalType: "user",
+        principalId: "synthetic-board",
+        status: "active",
+        membershipRole: "owner",
+      });
       const roles = await db
         .insert(agents)
         .values(

@@ -1,3 +1,4 @@
+import { PendingIntakeError } from "@/lib/use-master-intake";
 import { useCurrentAccountGuard } from "@/hooks/useAccountBoundMutation";
 import { ComposerFileDropTarget } from "./ComposerFileDropTarget";
 import { AgentAvatar } from "../AgentAvatar";
@@ -150,6 +151,7 @@ interface TaskChatComposerProps {
   /** Mentionable entities for the editor's @-autocomplete. */
   mentions?: MentionOption[];
   enableReassign?: boolean;
+  masterIntake?: boolean;
   conversationMode?: boolean;
   reassignOptions?: InlineEntityOption[];
   agentMap?: ReadonlyMap<string, import("../AgentAvatar").AvatarAgent & { icon?: string | null }>;
@@ -403,6 +405,7 @@ export function TaskChatComposer({
   onImageUpload,
   mentions,
   enableReassign = false,
+  masterIntake = false,
   conversationMode = false,
   reassignOptions,
   agentMap,
@@ -519,6 +522,10 @@ export function TaskChatComposer({
     const pending = pendingDraftRef.current;
     if (!pending || pending.draftKey !== draftKey ||
         loadDraftSubmission(pending.draftKey)?.attemptId !== pending.attemptId) return;
+    if (masterIntake) {
+      saveDraft(pending.draftKey, value, pending.attemptId);
+      return;
+    }
     // Keep text typed during delivery durable too. Navigation may happen before
     // either the request promise or the matching live server receipt arrives.
     saveDraft(pending.draftKey,
@@ -662,7 +669,7 @@ export function TaskChatComposer({
     !uncertainSubmission &&
     Boolean(creation || onAttachImage || onImageUpload);
   const showAssignee = Boolean(
-    enableReassign && reassignOptions && reassignOptions.length > 0,
+    !masterIntake && enableReassign && reassignOptions && reassignOptions.length > 0,
   );
   const assigneeValue = creation || conversationMode ? currentAssigneeValue : pendingAssignee ?? suggestedAssigneeValue ?? currentAssigneeValue;
   const showConversationModel = coordinator && conversationMode && supportsComposerModel(modelAgents?.get(assigneeValue.slice(6)));
@@ -1004,13 +1011,15 @@ export function TaskChatComposer({
       ? submittedBody
       : [trimmed, refLines].filter(Boolean).join("\n\n");
     const hasReassignment =
-      showAssignee && assigneeValue !== currentAssigneeValue;
+      !masterIntake && showAssignee && assigneeValue !== currentAssigneeValue;
     const reassignment = hasReassignment
       ? parseAssigneeValue(assigneeValue)
       : undefined;
-    const reopen = shouldImplicitlyReopenComment(issueStatus, assigneeValue)
-      ? true
-      : undefined;
+    const reopen = masterIntake
+      ? undefined
+      : shouldImplicitlyReopenComment(issueStatus, assigneeValue)
+        ? true
+        : undefined;
 
     // The thread renders the outgoing comment optimistically, so remove its
     // text from the composer at the same time. The editor remains writable for
@@ -1041,7 +1050,7 @@ export function TaskChatComposer({
         onCancelQueuedEdit?.();
         return;
       }
-      if (pendingMode !== workMode && onWorkModeChange) {
+      if (!masterIntake && pendingMode !== workMode && onWorkModeChange) {
         await onWorkModeChange(pendingMode);
       }
       const retainedAfterMode = draftKey ? loadDraftSubmission(draftKey) : null;
@@ -1104,6 +1113,12 @@ export function TaskChatComposer({
     } catch (error) {
       if (mountedTaskKey.current !== draftKey) return;
       const nextDraft = bodyRef.current;
+      if (masterIntake && error instanceof PendingIntakeError) {
+        if (draftKey && attemptId) clearDraftSubmission(draftKey, attemptId);
+        const submittedIds = new Set(submittedAttachments.map((item) => item.id));
+        setAttachments((current) => current.filter((item) => !submittedIds.has(item.id)));
+        return;
+      }
       // Not delivered, or not known to be: keep it and resend with the same
       // ID when the connection allows. The server dedupes by that ID.
       if (attemptId && request && classifySendFailure(error) === "pending") {
@@ -1516,7 +1531,7 @@ export function TaskChatComposer({
             <ComposerAddMenu
               privacy={creation?.privacy}
               mode={pendingMode}
-              onModeChange={!queuedEdit && onWorkModeChange ? changeMode : undefined}
+              onModeChange={!masterIntake && !queuedEdit && onWorkModeChange ? changeMode : undefined}
               onAttachFile={canAcceptFiles ? () => fileInputRef.current?.click() : undefined}
               onGoal={!queuedEdit && !conversationMode && attachments.length === 0 &&
                 runnerGoalCapability?.availability === "available" && onRunnerGoalCommand
@@ -1534,7 +1549,7 @@ export function TaskChatComposer({
                   : "Editing queued message"}
               </span>
             ) : (
-              <ComposerModeChip mode={pendingMode} onRemove={onWorkModeChange ? () => changeMode("standard") : undefined}
+              <ComposerModeChip mode={pendingMode} onRemove={!masterIntake && onWorkModeChange ? () => changeMode("standard") : undefined}
                 disabled={disabled || !!uncertainSubmission} testId="task-chat-composer-mode" mobile={mobile} />
             )}
             </div>

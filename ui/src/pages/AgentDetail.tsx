@@ -173,6 +173,11 @@ import {
   type AgentDetailView,
 } from "./agent-detail-navigation";
 import { LogViewer } from "../components/run-log/LogViewer";
+import {
+  ExecutionBindingRunDetails,
+  assertUnboundRunRestart,
+  executionBindingQueryOptions,
+} from "../components/ExecutionBindingRunDetails";
 import { asRecord, asNonEmptyString } from "../components/run-log/RunDetails";
 
 export { LogViewer } from "../components/run-log/LogViewer";
@@ -2994,8 +2999,11 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
     if (commentId) payload.commentId = commentId;
     return payload;
   }, [run.contextSnapshot, run.id]);
+  const executionBindingQuery = useQuery(executionBindingQueryOptions(run.companyId, run.id, run.status));
+  const canRestartNativeSession = executionBindingQuery.isSuccess && executionBindingQuery.data === null;
   const resumeRun = useMutation({
     mutationFn: async () => {
+      await assertUnboundRunRestart(run.companyId, run.id);
       const result = await agentsApi.wakeup(run.agentId, {
         source: "on_demand",
         triggerDetail: "manual",
@@ -3029,6 +3037,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
   }, [run.contextSnapshot]);
   const retryRun = useMutation({
     mutationFn: async () => {
+      await assertUnboundRunRestart(run.companyId, run.id);
       return agentsApi.retryFailedRun(run.agentId, run.id, run.companyId);
     },
     onSuccess: (newRun) => {
@@ -3041,6 +3050,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
 
   const rerunWithTrace = useMutation({
     mutationFn: async () => {
+      await assertUnboundRunRestart(run.companyId, run.id);
       const result = await agentsApi.wakeup(run.agentId, {
         source: "on_demand",
         triggerDetail: "manual",
@@ -3154,7 +3164,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                   size="sm"
                   className="text-xs h-6 px-2"
                   onClick={() => resumeRun.mutate()}
-                  disabled={resumeRun.isPending}
+                  disabled={resumeRun.isPending || !canRestartNativeSession}
                 >
                   <RotateCcw className="h-3.5 w-3.5 mr-1" />
                   {resumeRun.isPending ? "Resuming…" : "Resume"}
@@ -3166,7 +3176,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                   size="sm"
                   className="text-xs h-6 px-2"
                   onClick={() => retryRun.mutate()}
-                  disabled={retryRun.isPending}
+                  disabled={retryRun.isPending || !canRestartNativeSession}
                 >
                   <RotateCcw className="h-3.5 w-3.5 mr-1" />
                   {retryRun.isPending ? "Retrying…" : "Retry"}
@@ -3191,7 +3201,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                   size="sm"
                   className="text-xs h-6 px-2"
                   onClick={() => rerunWithTrace.mutate()}
-                  disabled={rerunWithTrace.isPending}
+                  disabled={rerunWithTrace.isPending || !canRestartNativeSession}
                 >
                   <RotateCcw className="h-3.5 w-3.5 mr-1" />
                   {rerunWithTrace.isPending ? "Starting…" : "Re-run with provider trace"}
@@ -3200,6 +3210,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
             </div>
             {/* Adapter type · provider · model */}
             {(() => {
+              if (!canRestartNativeSession) return null;
               const displayProvider = metrics.provider
                 ?? asNonEmptyString(adapterConfig?.provider);
               const displayModel = metrics.model
@@ -3464,6 +3475,14 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
         return <SourceResolvedFoldCallout fold={fold} finalizedAt={run.finishedAt} />;
       })()}
 
+      <ExecutionBindingRunDetails
+        record={executionBindingQuery.data}
+        runStatus={run.status}
+        taskId={getRunSnapshotIssueId(run)}
+        loading={executionBindingQuery.isPending}
+        failed={executionBindingQuery.isError}
+      />
+
       {/* Log viewer */}
       <LogViewer run={run} adapterType={adapterType} />
       <ScrollToBottom />
@@ -3473,7 +3492,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
         open={inspectorOpen}
         onOpenChange={setInspectorOpen}
         onRerunWithTrace={
-          canRerunWithProviderTrace && !["queued", "running"].includes(run.status)
+          canRerunWithProviderTrace && canRestartNativeSession && !["queued", "running"].includes(run.status)
             ? () => rerunWithTrace.mutate()
             : undefined
         }

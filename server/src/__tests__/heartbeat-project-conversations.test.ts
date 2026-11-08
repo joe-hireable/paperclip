@@ -12,6 +12,7 @@ import {
 import {
   agents,
   agentWakeupRequests,
+  authUsers,
   companies,
   companyMemberships,
   createDb,
@@ -54,6 +55,14 @@ describe("project conversation heartbeat exclusion", () => {
       "project-conversation-dispatch-",
     );
     db = createDb(temp.connectionString);
+    await db.insert(authUsers).values({
+      id: "fixture-board",
+      name: "Fixture Board",
+      email: "fixture-board@example.test",
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }).onConflictDoNothing();
     heartbeat = heartbeatService(db);
     registerServerAdapter({
       type: ADAPTER,
@@ -90,6 +99,7 @@ describe("project conversation heartbeat exclusion", () => {
       companyId,
       principalId: "fixture-board",
       principalType: "user",
+      status: "active",
       membershipRole: "admin",
     });
     await db
@@ -301,7 +311,12 @@ describe("project conversation heartbeat exclusion", () => {
     const f = await fixture(),
       pending = await pausedAdoption(f);
     // Models a legacy/internal writer inserting after adoption's pending-work query.
+    // Upstream privacy trigger 0313 copies contextSnapshot.issueId onto issue_id,
+    // and that FK share-lock waits behind adoption's FOR UPDATE. Disable it so
+    // the insert can land in the gap the backup schema allowed.
+    await db.execute(sql`ALTER TABLE heartbeat_runs DISABLE TRIGGER heartbeat_runs_set_scope_kind`);
     const run = await insertQueued(f);
+    await db.execute(sql`ALTER TABLE heartbeat_runs ENABLE TRIGGER heartbeat_runs_set_scope_kind`);
     const wakeId = randomUUID();
     await db
       .insert(agentWakeupRequests)

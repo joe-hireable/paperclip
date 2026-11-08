@@ -67,7 +67,9 @@ export type PreDrainFacts = {
   executionRunIdMatchesRun: boolean;
   isWorkspaceValidationFailedRun: boolean;
   isConfigurationIncompleteFailedRun: boolean;
-  /** The issue's current status. Only "todo" and "in_progress" can lead to the blocked-notice outcome. */
+  /** True when this finishing run reserved an explicit execution binding. */
+  hasBoundExecutionAttempt: boolean;
+  /** The issue's current status. todo/in_progress/in_review can lead to the blocked-notice outcome. */
   issueStatus: string;
   hasAssigneeUser: boolean;
   assigneeAgentMatchesRunAgent: boolean;
@@ -96,6 +98,13 @@ export function decidePreDrain(facts: PreDrainFacts): PreDrainDecision {
     return { kind: "released" };
   }
 
+  const blockedNoticeEligible =
+    (facts.issueStatus === "todo" || facts.issueStatus === "in_progress" || facts.issueStatus === "in_review") &&
+    !facts.hasAssigneeUser &&
+    facts.assigneeAgentMatchesRunAgent;
+  if (facts.hasBoundExecutionAttempt && blockedNoticeEligible) {
+    return { kind: "blocked", noticeKind: "bound_execution_attempt" };
+  }
   if (
     (facts.isWorkspaceValidationFailedRun || facts.isConfigurationIncompleteFailedRun) &&
     (facts.issueStatus === "todo" || facts.issueStatus === "in_progress") &&
@@ -206,6 +215,8 @@ export type ReleaseRecoverySharedFacts = {
   isStrandedRecoveryOrigin: boolean;
   recoveryAgentPresent: boolean;
   recoveryAgentInvokable: boolean;
+  /** True when the finishing run reserved an explicit execution binding. */
+  hasBoundExecutionAttempt: boolean;
 };
 
 export type ReleaseRecoveryReviewParticipantFacts = {
@@ -241,7 +252,8 @@ export type ReleaseRecoveryBlockedNoticeKind =
   | "workspace_validation"
   | "configuration_incomplete"
   | "execution_review_participant"
-  | "immediate_execution_path";
+  | "immediate_execution_path"
+  | "bound_execution_attempt";
 
 export type ReleaseRecoveryDecision =
   | { kind: "released" }
@@ -379,6 +391,17 @@ export function decideQueuedCommentActorOwnsEntry(facts: QueuedCommentActorOwner
 export function decideReleaseRecovery(facts: ReleaseRecoveryFacts): ReleaseRecoveryDecision {
   const { reviewParticipant, immediate, shared } = facts;
 
+  if (
+    shared.hasBoundExecutionAttempt &&
+    !immediate.isDispositionRepairRetry &&
+    (reviewParticipant.applies || immediate.applies) &&
+    !shared.hasExistingExecutionPath &&
+    !shared.hasPersistedMonitor &&
+    !immediate.hasExplicitBlockerPath
+  ) {
+    return { kind: "blocked", notice: "bound_execution_attempt" };
+  }
+
   if (reviewParticipant.applies) {
     if (
       facts.suppressImmediateRecovery ||
@@ -418,11 +441,13 @@ export function decideReleaseRecovery(facts: ReleaseRecoveryFacts): ReleaseRecov
     immediate.isConfigurationIncompleteFailedRun ||
     immediate.automaticRecoveryAlreadyFailed;
   if (shouldBlockImmediately) {
-    const notice: ReleaseRecoveryBlockedNoticeKind = immediate.isWorkspaceValidationFailedRun
-      ? "workspace_validation"
-      : immediate.isConfigurationIncompleteFailedRun
-        ? "configuration_incomplete"
-        : "immediate_execution_path";
+    const notice: ReleaseRecoveryBlockedNoticeKind = shared.hasBoundExecutionAttempt
+      ? "bound_execution_attempt"
+      : immediate.isWorkspaceValidationFailedRun
+        ? "workspace_validation"
+        : immediate.isConfigurationIncompleteFailedRun
+          ? "configuration_incomplete"
+          : "immediate_execution_path";
     return { kind: "blocked", notice };
   }
 

@@ -1,3 +1,4 @@
+import { PendingIntakeError } from "../lib/use-master-intake";
 import { useCurrentAccountGuard } from "../hooks/useAccountBoundMutation";
 import { resolveIssueChatHumanAuthor } from "@/lib/issue-chat-human-author";
 import { useCurrentWorkspaceRetry, useWorkspaceBaseRefRecovery, useWorkspaceRetry } from "./WorkspaceBaseRefRecovery";
@@ -532,6 +533,7 @@ interface IssueChatComposerProps {
   onImageUpload?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<IssueAttachment | void>;
   draftKey?: string;
+  masterIntake?: boolean;
   enableReassign?: boolean;
   reassignOptions?: InlineEntityOption[];
   currentAssigneeValue?: string;
@@ -648,6 +650,7 @@ interface IssueChatThreadProps {
   imageUploadHandler?: (file: File) => Promise<string>;
   onAttachImage?: (file: File) => Promise<IssueAttachment | void>;
   draftKey?: string;
+  masterIntake?: boolean;
   enableReassign?: boolean;
   reassignOptions?: InlineEntityOption[];
   currentAssigneeValue?: string;
@@ -4711,6 +4714,7 @@ const IssueChatComposer = forwardRef<
     onImageUpload,
     onAttachImage,
     draftKey: sharedDraftKey,
+    masterIntake = false,
     enableReassign = false,
     reassignOptions = [],
     currentAssigneeValue = "",
@@ -4787,6 +4791,10 @@ const IssueChatComposer = forwardRef<
     const pending = pendingDraftRef.current;
     if (!pending || pending.draftKey !== draftKey ||
         loadDraftSubmission(pending.draftKey)?.attemptId !== pending.attemptId) return;
+    if (masterIntake) {
+      saveDraft(pending.draftKey, value, pending.attemptId);
+      return;
+    }
     // Persist the next draft while delivery is pending, before navigation or a
     // lost response can turn the original submission into an uncertain one.
     saveDraft(pending.draftKey,
@@ -5115,16 +5123,18 @@ const IssueChatComposer = forwardRef<
       return;
 
     const hasReassignment =
-      enableReassign && reassignTarget !== currentAssigneeValue;
+      !masterIntake && enableReassign && reassignTarget !== currentAssigneeValue;
     const reassignment = hasReassignment
       ? (parseReassignment(reassignTarget) ?? undefined)
       : undefined;
-    const reopen = shouldImplicitlyReopenComment(
-      issueStatus,
-      hasReassignment ? reassignTarget : currentAssigneeValue,
-    )
-      ? true
-      : undefined;
+    const reopen = masterIntake
+      ? undefined
+      : shouldImplicitlyReopenComment(
+          issueStatus,
+          hasReassignment ? reassignTarget : currentAssigneeValue,
+        )
+        ? true
+        : undefined;
     const submittedBody = [
       trimmed,
       ...attachedFiles.map(
@@ -5155,7 +5165,10 @@ const IssueChatComposer = forwardRef<
     );
 
     const workModeChanged = pendingWorkMode !== resolvedIssueWorkMode;
-    if (draftKey) saveDraft(draftKey, trimmed);
+    if (draftKey) {
+      if (masterIntake) clearDraft(draftKey);
+      else saveDraft(draftKey, trimmed);
+    }
     setSubmitting(true);
     bodyRef.current = "";
     setBody("");
@@ -5163,7 +5176,7 @@ const IssueChatComposer = forwardRef<
     let request: ComposerSendRequest | null = null;
     const requestOwner = draftOwner;
     try {
-      if (workModeChanged && onWorkModeChange) {
+      if (!masterIntake && workModeChanged && onWorkModeChange) {
         await onWorkModeChange(pendingWorkMode);
       }
       const retained = draftKey ? loadDraftSubmission(draftKey) : null;
@@ -5184,7 +5197,7 @@ const IssueChatComposer = forwardRef<
         ...(runSettings ? { runSettings: runSettings as unknown as Record<string, unknown> } : {}),
       };
       if (draftKey) {
-        saveDraft(draftKey, trimmed);
+        if (!masterIntake) saveDraft(draftKey, trimmed);
         saveDraftSubmission(draftKey, { attemptId, reviewed: false, request, requestOwner });
         pendingDraftRef.current = { draftKey, attemptId, submittedBody: trimmed, submittedAttachmentIds: attachmentIds, request, requestOwner };
         changeBody(bodyRef.current);
@@ -5212,6 +5225,10 @@ const IssueChatComposer = forwardRef<
     } catch (error) {
       if (mountedTaskKey.current !== draftKey) return;
       const nextDraft = bodyRef.current;
+      if (masterIntake && error instanceof PendingIntakeError) {
+        if (draftKey && attemptId) clearDraftSubmission(draftKey, attemptId);
+        return;
+      }
       // Not delivered, or not known to be: keep it and resend with the same
       // ID when the connection allows. The server dedupes by that ID.
       if (attemptId && request && classifySendFailure(error) === "pending") {
@@ -5910,6 +5927,7 @@ export function IssueChatThread({
   imageUploadHandler,
   onAttachImage,
   draftKey,
+  masterIntake = false,
   enableReassign = false,
   reassignOptions = [],
   currentAssigneeValue = "",
@@ -6904,7 +6922,8 @@ export function IssueChatThread({
                   comment.authorUserId === currentUserId && comment.clientRequestId &&
                   !("clientStatus" in comment && comment.clientStatus)
                 ).map((comment) => comment.clientRequestId!))}
-                enableReassign={enableReassign}
+                masterIntake={masterIntake}
+                enableReassign={enableReassign && !masterIntake}
                 reassignOptions={reassignOptions}
                 currentAssigneeValue={currentAssigneeValue}
                 companyId={companyId}

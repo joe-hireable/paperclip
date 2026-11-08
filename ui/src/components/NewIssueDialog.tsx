@@ -38,6 +38,9 @@ import { Button } from "@/components/ui/button";
 import { Paperclip, FileText, Flag, PauseCircle, ListTree, X, ShieldAlert, Folder, ChevronDown, Lock } from "lucide-react";
 import type { MentionOption } from "./MarkdownEditor";
 import { TaskChatComposer } from "./task-chat/TaskChatComposer";
+import { ExecutionBindingSelector } from "./ExecutionBindingSelector";
+import { boundTaskOverrides, requiresTaskBinding } from "../lib/execution-binding-task";
+import type { ExecutionBindingSelection } from "@paperclipai/shared/execution-bindings";
 import { ComposerWorktreePicker } from "./task-chat/ComposerWorktreePicker";
 import { TaskChatPresentationProvider } from "./task-chat/presentation-mode";
 import { mergeComposerRunSettings, type ComposerRunSettings } from "./task-chat/composer-run-settings";
@@ -475,6 +478,8 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
   const [watchdogInstructions, setWatchdogInstructions] = useState("");
   const [projectId, setProjectId] = useState("");
   const [projectWorkspaceId, setProjectWorkspaceId] = useState("");
+  const [bindingSelection, setBindingSelection] = useState<{ context: string; selection: ExecutionBindingSelection } | null>(null);
+  const [bindingInputRevision, setBindingInputRevision] = useState(0);
   const [assigneeModelLane, setAssigneeModelLane] = useState<IssueModelLane>("primary");
   const [assigneeModelOverride, setAssigneeModelOverride] = useState("");
   const [assigneeThinkingEffort, setAssigneeThinkingEffort] = useState("");
@@ -599,6 +604,16 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     () => (agents ?? []).find((agent) => agent.id === selectedAssigneeAgentId) ?? null,
     [agents, selectedAssigneeAgentId],
   );
+  const bindingRequired = requiresTaskBinding(selectedAssigneeAgent);
+  const bindingContext = JSON.stringify([
+    effectiveCompanyId,
+    selectedAssigneeAgentId,
+    projectId,
+    projectWorkspaceId,
+    bindingInputRevision,
+    stagedFiles.map((file) => [file.file.name, file.file.size, file.file.lastModified]),
+  ]);
+  const qualifiedBinding = bindingSelection?.context === bindingContext ? bindingSelection.selection : null;
   const assigneeAdapterType = selectedAssigneeAgent?.adapterType ?? null;
   const mentionOptions = useMemo<MentionOption[]>(() => {
     return buildMarkdownMentionOptions({
@@ -817,6 +832,7 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     (nextDescription: string) => {
       descriptionRef.current = nextDescription;
       setDescription(nextDescription);
+      setBindingInputRevision((value) => value + 1);
 
       queueDraftSave({ description: nextDescription });
     },
@@ -1028,6 +1044,8 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
     setStatus("todo");
     setPriority("");
     setAssigneeValue("");
+    setBindingSelection(null);
+    setBindingInputRevision((value) => value + 1);
     setReviewerValue("");
     setApproverValue("");
 
@@ -1095,14 +1113,16 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
       reviewerValues: reviewerValue ? [reviewerValue] : [],
       approverValues: approverValue ? [approverValue] : [],
     });
-    const assigneeAdapterOverrides = settings
-      ? mergeComposerRunSettings(inheritedOverrides, assigneeAdapterType ?? undefined, settings)
-      : inheritedOverrides;
+    const assigneeAdapterOverrides = bindingRequired
+      ? (qualifiedBinding ? boundTaskOverrides(qualifiedBinding) : undefined)
+      : settings
+        ? mergeComposerRunSettings(inheritedOverrides, assigneeAdapterType ?? undefined, settings)
+        : inheritedOverrides;
     const createData = {
       companyId: effectiveCompanyId,
       ...(currentTitle ? { title: currentTitle } : {}),
       description: currentDescription || undefined,
-      status,
+      status: bindingRequired ? "backlog" : status,
       priority: priority || "medium",
       workMode: mode,
       ...(effectivePrivate ? { visibility: "private" } : {}),
@@ -1436,10 +1456,10 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
               companyId={effectiveCompanyId}
               enableReassign
               reassignOptions={assigneeOptions}
-              modelAgents={modelAgents}
+              modelAgents={bindingRequired ? undefined : modelAgents}
               agentMap={modelAgents}
               currentAssigneeValue={assigneeValue}
-              assigneeAdapterOverrides={inheritedOverrides}
+              assigneeAdapterOverrides={bindingRequired ? null : inheritedOverrides}
               onPendingAssigneeChange={(value) => {
                 if (value === null) return;
                 defaultAssigneePendingRef.current = false;
@@ -1447,6 +1467,8 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
                 if (next.assigneeAgentId) trackRecentAssignee(next.assigneeAgentId, effectiveCompanyId ?? undefined);
                 if (next.assigneeUserId) trackRecentAssigneeUser(next.assigneeUserId, effectiveCompanyId ?? undefined);
                 setAssigneeValue(value);
+                setBindingSelection(null);
+                setBindingInputRevision((value) => value + 1);
                 setComposerSettings(null);
                 setAssigneeModelLane("primary");
                 setAssigneeModelOverride("");
@@ -1520,6 +1542,7 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
                           onChange={(event) => {
                             titleRef.current = event.target.value;
                             setTitle(event.target.value);
+                            setBindingInputRevision((value) => value + 1);
                             queueDraftSave({ title: event.target.value });
                           }}
                         />
@@ -1542,6 +1565,20 @@ function AccountNewIssueDialog({ ignoreDefaults }: { ignoreDefaults: boolean }) 
                   ) : undefined,
                 details: (
                   <>
+                    {bindingRequired && effectiveCompanyId && selectedAssigneeAgentId ? (
+                      <div className="mb-3 space-y-2">
+                        <ExecutionBindingSelector
+                          key={bindingContext}
+                          companyId={effectiveCompanyId}
+                          agentId={selectedAssigneeAgentId}
+                          contextKey={bindingContext}
+                          value={qualifiedBinding}
+                          disabled={createIssue.isPending || !projectId || !projectWorkspaceId || experimentalSettings?.enableManagedSandboxOnly === true}
+                          onSelect={(selection) => setBindingSelection(selection ? { context: bindingContext, selection } : null)}
+                        />
+                        <p className="text-xs text-muted-foreground">This task will be created in backlog. Review its saved files and execution in properties before starting. Paused roles stay paused.</p>
+                      </div>
+                    ) : null}
                     {parentPrivacyUnresolved ? (
                       <div role={parentPrivacyError ? "alert" : "status"} className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
                         <span>{parentPrivacyError ? "Couldn't check parent access." : "Checking parent access…"}</span>

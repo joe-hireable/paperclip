@@ -549,6 +549,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     imageUploadHandler,
     mentions,
     enableReassign,
+    masterIntake,
     conversationMode,
     reassignOptions,
     currentAssigneeValue,
@@ -3572,6 +3573,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                           onImageUpload={imageUploadHandler}
                           mentions={mentions}
                           enableReassign={enableReassign}
+                          masterIntake={masterIntake}
                           conversationMode={conversationMode}
                           reassignOptions={reassignOptions}
                           agentMap={agentMap}

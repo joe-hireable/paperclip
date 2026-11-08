@@ -53,7 +53,7 @@ import { remoteExecutionHasStopped } from "../remote-execution-termination.js";
 import { registerAdapterExecutionControl } from "../adapter-execution-control.js";
 import { resolveManagedOpenAiBilling } from "@paperclipai/adapter-utils";
 import { and, eq, isNull, sql } from "drizzle-orm";
-import { heartbeatRuns, nativeRunFinalizations, workspaceOperations } from "@paperclipai/db";
+import { heartbeatRuns, nativeRunFinalizations, workspaceOperations, type Db, type agents, type executionWorkspaces } from "@paperclipai/db";
 import { conflict } from "../../errors.js";
 import { getStartupTraceContext } from "../../instrumentation.js";
 import { logger } from "../../middleware/logger.js";
@@ -72,7 +72,16 @@ import {
   buildNativeWakeIngressSpan,
 } from "../native-runtime/native-run-trace.js";
 import { PROVIDER_TRACE_MAX_BYTES } from "../provider-trace-store.js";
-import type { AdapterExecutionResult } from "../../adapters/index.js";
+import type { AdapterExecutionResult, AdapterInvocationMeta } from "../../adapters/index.js";
+import {
+  assertCoordinatorRunAdmission,
+} from "../project-coordinator-attempts.js";
+import {
+  prepareCoordinatorDelivery,
+  verifyCoordinatorInvocation,
+} from "../coordinator-delivery.js";
+import { assertStaticIntelligentRoutingDelivery } from "../intelligent-routing-runtime.js";
+import type { CoordinatorDeliveryManifest } from "@paperclipai/shared/coordinator-delivery";
 import { createLocalAgentJwt } from "../../agent-auth-jwt.js";
 import { parseObject, asNumber } from "../../adapters/utils.js";
 import { NativeRunnerOwnershipUnverifiedError } from "../native-runtime/native-runner-ownership.js";
@@ -87,7 +96,6 @@ import {
   isRunnerGoalActionCompleted,
   settleLiveRunnerGoalBeforeInterrupt,
 } from "../runner-goals.js";
-import type { Db, agents, executionWorkspaces } from "@paperclipai/db";
 import type { AdapterExecutionContext, ServerAdapterModule } from "../../adapters/index.js";
 import type { HeartbeatRuntimeSelectionInput, HeartbeatRuntimeSelectionResult } from "./runtime-selection.js";
 import type { createHeartbeatRunState } from "./run-state.js";
@@ -106,6 +114,7 @@ import type { NativeExecutionInput, NativeSessionBackend } from "../../vendor/pa
 import type { PluginWorkerManager } from "../plugin-worker-manager.js";
 import type { RealizedExecutionWorkspace } from "../workspace-runtime.js";
 import type { reserveWarmNativeInstructionDirectory } from "../native-runtime/index.js";
+import type { ExecutionBindingSnapshot } from "@paperclipai/shared/execution-bindings";
 
 type Selection = HeartbeatRuntimeSelectionInput;
 type Selected = Extract<HeartbeatRuntimeSelectionResult, { selected: true }>;
@@ -117,6 +126,8 @@ type Lifecycle = ReturnType<typeof createHeartbeatLifecycle>;
 export interface HeartbeatRuntimeExecutionInput {
   run: typeof heartbeatRuns.$inferSelect;
   agent: typeof agents.$inferSelect;
+  executionBinding?: ExecutionBindingSnapshot | null;
+  coordinatorState?: Awaited<ReturnType<typeof assertCoordinatorRunAdmission>> | null;
   options: {
     nativeSessionBackendFactory?: (execution: NativeExecutionInput, context?: { recoveryPurpose: "execution" | "stop_cleanup" }) => NativeSessionBackend;
     pluginWorkerManager?: PluginWorkerManager;
@@ -196,6 +207,16 @@ export interface HeartbeatRuntimeExecutionInput {
     executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "getStoredById">;
     instanceSettings: Pick<ReturnType<typeof instanceSettingsService>, "getExperimental">;
     envOrchestrator: Pick<ReturnType<typeof environmentRunOrchestrator>, "releaseForRun">;
+    appendRunEvent?: (run: typeof heartbeatRuns.$inferSelect, event: {
+      eventType: string;
+      stream: "system";
+      level: "info";
+      payload?: Record<string, unknown>;
+    }) => Promise<unknown>;
+    assertBeforeLaunch?: (
+      runtimeConfig: Record<string, unknown>,
+      authorityTransaction?: Db,
+    ) => Promise<unknown>;
   };
   // Teardown must observe these updates immediately, including when execution later throws.
   effects: {
@@ -207,6 +228,7 @@ export interface HeartbeatRuntimeExecutionInput {
     onNativeWorkspaceFinalizeScheduled: () => void;
     onNativeSessionResumeScheduled: () => void;
     onNativeOwnershipHeld: () => void;
+    onCoordinatorVerified?: () => void;
   };
 }
 
@@ -239,7 +261,7 @@ function readNonEmptyString(value: unknown): string | null {
 }
 
 export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExecutionInput): Promise<HeartbeatRuntimeExecutionResult> {
-  const { run, agent, options } = input;
+  const { run, agent, options, coordinatorState = null } = input;
   const { issueRef, issueContext, context, issueId, taskKey, executionContinuation } = input.task;
   const { nativeRuntimeResolution, nativeExecution, nativeRunnerInstanceId, adapter, runtimeForAdapter, getNativeFreshSessionHandoff, getFreshSessionHandoff, runOptions } = input.runtime;
   const { persistedExecutionWorkspace, executionWorkspace, executionTarget, workspaceOperationRecorder, nativeWorkspaceSync, workspaceRestoreSource, remoteExecution } = input.workspace;
@@ -255,8 +277,18 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
   };
   const { identityRedactor, appendIdentityRedactedLog, onLog, onAdapterEvent, onAdapterMeta } = input.output;
   const { executionWorkspacesSvc, instanceSettings, envOrchestrator, upsertTaskSession, getRun, cancelRunInternal, enqueueWakeup, persistRunProcessMetadata, recordCurrentHeartbeatRunRuntimeProgress, dispatchPendingNativeStatusWakeups } = input.services;
-  const localAgentJwtScope =
-    issueRef?.workMode === "skill_test"
+  if (coordinatorState && !configuredPaperclipApiBaseUrl()) {
+    throw conflict("Coordinator run requires the configured task API URL");
+  }
+  const localAgentJwtScope = coordinatorState
+    ? {
+        kind: "project_coordinator" as const,
+        projectId: coordinatorState.project.id,
+        intakeIssueId: coordinatorState.intake.id,
+        attemptIssueId: coordinatorState.attempt.id,
+        authorityDigest: coordinatorState.authorityDigest,
+      }
+    : issueRef?.workMode === "skill_test"
       ? { kind: "skill_test" as const, issueId: issueRef.id }
       : { kind: "standard" as const };
   const authToken =
@@ -271,6 +303,9 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           localAgentJwtScope,
         )
       : null;
+  if (coordinatorState && !authToken) {
+    throw conflict("Coordinator run requires its scoped token");
+  }
   if (
     nativeRuntimeResolution.kind === "legacy" &&
     adapter.supportsLocalAgentJwt &&
@@ -793,13 +828,35 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
             }
           : {}),
       };
-      const runtimeTools = createAdapterRuntimeToolAccess({
-        agentId: agent.id,
-        companyId: agent.companyId,
-        runId: run.id,
-        responsibleUserId: run.responsibleUserId,
-      });
-      if (!runtimeTools) {
+      const routingReceipt = input.executionBinding?.routingReceipt;
+      let coordinatorManifest: CoordinatorDeliveryManifest | null = null;
+      let coordinatorPrepared = false;
+      if (coordinatorState) {
+        coordinatorManifest = await prepareCoordinatorDelivery({
+          runId: run.id,
+          companyId: run.companyId,
+          attemptIssueId: coordinatorState.attempt.id,
+          authorityDigest: coordinatorState.authorityDigest,
+          instructions: coordinatorState.central.bundle,
+          skills: coordinatorState.skills,
+          projectContext: coordinatorState.projectContext,
+          config: runtimeConfig,
+        });
+        adapterContext.paperclipCoordinator = coordinatorManifest;
+        adapterContext.coordinatorPrompt =
+          `Finite task from the authenticated source. Preserve source trust ${JSON.stringify(coordinatorState.intake.sourceTrust)}.\n${coordinatorState.taskSource}`;
+      } else if (runtimeConfig.intelligentRoutingDeliveryMode === "manifest_coordinator") {
+        throw conflict("Coordinator delivery requires native admitted authority");
+      }
+      const runtimeTools = routingReceipt
+        ? undefined
+        : createAdapterRuntimeToolAccess({
+            agentId: agent.id,
+            companyId: agent.companyId,
+            runId: run.id,
+            responsibleUserId: run.responsibleUserId,
+          });
+      if (!runtimeTools && !routingReceipt) {
         logger.warn(
           {
             companyId: agent.companyId,
@@ -809,11 +866,13 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           "runtime connection tools could not be delivered",
         );
       }
-      const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
-        db,
-        agent,
-        runId: run.id,
-      });
+      const runtimeMcpServers = routingReceipt
+        ? []
+        : await buildPaperclipRuntimeMcpServers({
+            db,
+            agent,
+            runId: run.id,
+          });
       const runtimeToolDelivery =
         adapter.runtimeToolDelivery ?? "invocation_context";
       if (runtimeTools && runtimeToolDelivery === "native_mcp") {
@@ -824,30 +883,80 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           connectionId: "paperclip-runtime-tools",
         });
       }
-      if (authToken && configuredPaperclipApiBaseUrl() && issueRef) {
+      if (!routingReceipt && authToken && configuredPaperclipApiBaseUrl() && issueRef) {
         runtimeMcpServers.unshift({ name: "Paperclip projects", url: `${paperclipApiBaseUrl()}/api/mcp/project-tools`,
           token: authToken, connectionId: "paperclip-project-tools" });
       }
-      const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);
+      const runtimeMcp = createAdapterRuntimeMcpAccess(routingReceipt ? [] : runtimeMcpServers);
       if (runtimeTools && runtimeToolDelivery === "invocation_context") {
         adapterContext.paperclipRuntimeTools = runtimeTools;
       }
-      const managedMcpConfig = await measureRunPhase("execution.mcp_handoff", () => createManagedMcpRunConfig({
-        db,
-        agent,
-        runId: run.id,
-        config: runtimeConfig,
-        projectId: issueRef?.projectId ?? null,
-        issueId: issueRef?.id ?? null,
-      }));
+      const managedMcpConfig = routingReceipt
+        ? null
+        : await measureRunPhase("execution.mcp_handoff", () => createManagedMcpRunConfig({
+            db,
+            agent,
+            runId: run.id,
+            config: runtimeConfig,
+            projectId: issueRef?.projectId ?? null,
+            issueId: issueRef?.id ?? null,
+          }));
       if (managedMcpConfig) {
         adapterContext.paperclipManagedMcp = managedMcpConfig;
       }
+      const invokeOnAdapterMeta = async (meta: AdapterInvocationMeta) => {
+        if (coordinatorState) {
+          if (!coordinatorManifest || coordinatorPrepared) {
+            throw conflict("Coordinator preparation gate is unavailable");
+          }
+          const current = await db.transaction((tx) =>
+            assertCoordinatorRunAdmission(tx as unknown as Db, {
+              companyId: run.companyId,
+              attemptId: coordinatorState.attempt.id,
+              agentId: run.agentId,
+              runId: run.id,
+            }),
+          );
+          if (current.authorityDigest !== coordinatorManifest.authorityDigest) {
+            throw conflict("Coordinator authority changed before spawn");
+          }
+          await input.services.assertBeforeLaunch?.(
+            runtimeConfig as Record<string, unknown>,
+          );
+          const receipt = await verifyCoordinatorInvocation(meta, coordinatorManifest);
+          coordinatorPrepared = true;
+          input.effects.onCoordinatorVerified?.();
+          await input.services.appendRunEvent?.(run, {
+            eventType: "coordinator.prepared",
+            stream: "system",
+            level: "info",
+            payload: receipt,
+          });
+          return;
+        }
+        if (!onAdapterMeta) {
+          return;
+        }
+        return onAdapterMeta(meta);
+      };
       const guardedDispatch =
         await dispatchWithTiming(
           (markDispatchStarted) => {
             input.effects.onLegacyAdapterEntered();
-            return withAdapterExecutionPhase(executionPhaseContext, "adapter_execution", () => adapter.execute({
+            return withAdapterExecutionPhase(executionPhaseContext, "adapter_execution", async () => {
+              if (routingReceipt) {
+                await assertStaticIntelligentRoutingDelivery({
+                  adapterType: input.executionBinding!.binding.adapterType,
+                  qualifiedCwd: String(input.executionBinding!.adapterConfig.cwd ?? ""),
+                  config: runtimeConfig,
+                  context: adapterContext,
+                  executionTarget,
+                  runtimeToolsPresent: runtimeTools != null,
+                  runtimeMcpServerCount: 0,
+                  managedMcpPresent: managedMcpConfig !== null,
+                });
+              }
+              return adapter.execute({
               getFreshSessionHandoff,
               agentIdentity,
               observability,
@@ -871,7 +980,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               runtimeMcp,
               runtimeTools,
               onLog,
-              onMeta: onAdapterMeta,
+              onMeta: invokeOnAdapterMeta,
               onEvent: onAdapterEvent,
               onUsage: usageRecorder ? async receipt => { await usageRecorder.capture(receipt); } : undefined,
               onExecutionPhase: executionControl.phases.enter,
@@ -926,11 +1035,19 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                 });
               },
               authToken: authToken ?? undefined,
-            }));
+            });
+            });
           },
         );
       if (!guardedDispatch.dispatched) return { dispatched: false };
       adapterResult = await guardedDispatch.resultPromise;
+    }
+    if (input.executionBinding?.binding.billingRoute === "paid_api") {
+      adapterResult = {
+        ...adapterResult,
+        billingType: "api",
+        biller: input.executionBinding.binding.accountKey,
+      };
     }
     adapterResult = identityRedactor.redact(adapterResult);
     if (run.runtimeMode === "legacy" && hasWorkspaceRestoreFailure(adapterResult.resultJson)

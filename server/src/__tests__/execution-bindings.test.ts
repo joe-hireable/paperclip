@@ -861,7 +861,7 @@ describeDb("durable account reservation", () => {
     const second = await fixture("claude_local", { accountKey: first.account.accountKey });
     await first.service.acquire(first.runs[0]!, first.roles[0]!);
     const held = await first.service.getRunBinding(first.companyId, first.runs[0]!.id);
-    const statements = (await readFile(new URL("../../../packages/db/src/migrations/0243_complex_sunfire.sql", import.meta.url), "utf8")).split("--> statement-breakpoint");
+    const statements = (await readFile(new URL("../../../packages/db/src/migrations/0441_complex_sunfire.sql", import.meta.url), "utf8")).split("--> statement-breakpoint");
     const rollback = new Error("restore synthetic migration fixture");
     await expect(db.transaction(async (tx) => {
       // Reproduce the old schema inside a transaction; restore the entire fixture afterwards.
