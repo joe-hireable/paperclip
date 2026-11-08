@@ -769,6 +769,12 @@ export interface CreateConfigValues {
   claudeAcpStateDir?: string;
   claudeAcpWarmHandleIdleMs?: number;
   codexEngine?: "auto" | "cli" | "acp";
+  /**
+   * SSH credential source for codex_local and grok_local.
+   * Unset means managed: stage the controller login into the remote run.
+   * `native` uses the login already on the SSH host.
+   */
+  remoteCredentials?: "managed" | "native";
   codexAcpAgentCommand?: string;
   codexAcpMode?: "persistent" | "oneshot";
   codexAcpNonInteractivePermissions?: "deny" | "fail";

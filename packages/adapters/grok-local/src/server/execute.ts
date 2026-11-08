@@ -6,6 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import {
+  readConfiguredRemoteHome,
+  usesNativeSshCredentials,
+} from "@paperclipai/adapter-utils/remote-credentials";
+import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
   adapterExecutionTargetSessionIdentity,
@@ -295,6 +299,10 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
 
   const executeTurn = async (): Promise<AdapterExecutionResult> => {
     const envConfig = parseObject(config.env);
+    const nativeSshCredentials = usesNativeSshCredentials(config, executionTarget);
+    const nativeRemoteGrokHome = nativeSshCredentials
+      ? readConfiguredRemoteHome(envConfig, "GROK_HOME")
+      : null;
     const env: Record<string, string> = {
       ...buildPaperclipEnv(agent, ctx.agentIdentity),
       ...buildRuntimeToolsEnv(ctx.runtimeTools),
@@ -365,7 +373,10 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
       config.managedAiConnection ? env : { ...process.env, ...env },
       "XAI_API_KEY",
     );
-    if (isGrokSubscriptionMode) {
+    if (nativeSshCredentials && isGrokSubscriptionMode) {
+      if (nativeRemoteGrokHome) env.GROK_HOME = nativeRemoteGrokHome;
+      else delete env.GROK_HOME;
+    } else if (isGrokSubscriptionMode) {
       const pinManagedHome =
         executionTargetIsRemote ||
         restrictedBinding ||
@@ -396,13 +407,16 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
     if (executionTargetIsRemote) {
       await onLog(
         "stdout",
-        `[paperclip] Syncing Grok workspace to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+        nativeSshCredentials
+          ? `[paperclip] Using the SSH host's own Grok login. No auth file will be staged or copied back.\n`
+          : `[paperclip] Syncing Grok workspace to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
       );
       // Stage only the credential file the remote lane needs into a curated
       // temp dir and ship THAT as the `home` asset, the same curated-snapshot
       // approach the Codex adapter uses. Subscription mode only: an API-key
       // run authenticates from the environment variable and needs no home.
-      if (isGrokSubscriptionMode) {
+      // Native SSH uses the login already on the remote host instead.
+      if (isGrokSubscriptionMode && !nativeSshCredentials) {
         stagedGrokHomeDir = await stageGrokHomeForSync(hostGrokHome, { runId });
       }
       const preparedExecutionTargetRuntime = await prepareAdapterExecutionTargetRuntime({
@@ -460,7 +474,10 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
       // Set GROK_HOME after the refresh above, so the refresh cannot overwrite
       // it. The fixed fallback path mirrors `prepareAdapterExecutionTargetRuntime`'s
       // own `home` asset layout, in case `assetDirs.home` is absent.
-      if (isGrokSubscriptionMode) {
+      if (nativeSshCredentials && isGrokSubscriptionMode) {
+        if (nativeRemoteGrokHome) env.GROK_HOME = nativeRemoteGrokHome;
+        else delete env.GROK_HOME;
+      } else if (isGrokSubscriptionMode) {
         env.GROK_HOME =
           preparedExecutionTargetRuntime.assetDirs.home ??
           path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "grok", "home");
@@ -473,6 +490,9 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    if (nativeSshCredentials && isGrokSubscriptionMode && !nativeRemoteGrokHome) {
+      delete effectiveEnv.GROK_HOME;
+    }
     const runtimeEnv = ensurePathInEnv(effectiveEnv);
     await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv, {
       installCommand: ctx.runtimeCommandSpec?.installCommand ?? null,

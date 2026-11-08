@@ -23,6 +23,17 @@ export function getConfigSchema(): AdapterConfigSchema {
         hint: "Default uses ACP. If ACP is unavailable, the run fails with a setup error. Choose CLI explicitly to use it.",
       },
       {
+        key: "remoteCredentials",
+        label: "SSH remote credentials",
+        type: "select",
+        default: "managed",
+        options: [
+          { value: "managed", label: "Managed login" },
+          { value: "native", label: "Remote host login" },
+        ],
+        hint: "Managed copies this instance's Codex login to the SSH host for each run and copies a refreshed login back. Native uses the login already on the SSH host. Set CODEX_HOME to a path on that host, or leave it unset to use the host default. Sandbox runs stay managed.",
+      },
+      {
         key: "agentCommand",
         label: "ACP server command",
         type: "text",

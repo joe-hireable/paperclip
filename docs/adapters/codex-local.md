@@ -77,12 +77,21 @@ A managed home is created empty, so the adapter must provision auth into it befo
    Paperclip-managed company tree, that home is self-managed. Paperclip does
    not seed or overwrite it, so its own `auth.json` wins.
 
-For sandbox or SSH execution, Paperclip uploads the effective managed
-`CODEX_HOME` and launches Codex with `CODEX_HOME` pointing at that uploaded
-directory. Any `auth.json` already baked into the sandbox image is shadowed in
-managed-home mode. If the host has no usable `auth.json` and no per-agent
-`OPENAI_API_KEY`, the managed run fails fast instead of falling back to an
-in-sandbox login.
+For sandbox execution, and for SSH execution when `remoteCredentials` is unset
+or `"managed"`, Paperclip uploads the effective managed `CODEX_HOME` and
+launches Codex with `CODEX_HOME` pointing at that uploaded directory. Any
+`auth.json` already baked into the sandbox image is shadowed in managed-home
+mode. If the host has no usable `auth.json` and no per-agent `OPENAI_API_KEY`,
+the managed run fails fast instead of falling back to an in-sandbox login.
+
+Set `remoteCredentials` to `"native"` for an SSH host that is already logged
+in to Codex. Paperclip then stages no auth file, copies nothing back, and
+leaves `CODEX_HOME` unset unless the agent env sets it. A set `CODEX_HOME` is
+a path on the SSH host, not a path on the Paperclip machine. When it is unset,
+Codex uses its default home on that host. Sandbox runs ignore this option and
+stay managed. After a managed or native SSH run, Paperclip removes the
+per-run remote directory once workspace changes and any refreshed login have
+been copied back. Cleanup failure is logged and does not fail the run.
 
 Worked example: a worker runs in a sandbox image that already has
 `$HOME/.codex/auth.json`, and the Paperclip host is logged in with a ChatGPT

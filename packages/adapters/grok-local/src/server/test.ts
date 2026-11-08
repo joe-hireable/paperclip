@@ -27,6 +27,7 @@ import { copyBackGrokAuth } from "./grok-auth-copyback.js";
 import { DEFAULT_GROK_LOCAL_MODEL } from "../index.js";
 import { parseGrokJsonl } from "./parse.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
+import { usesNativeSshCredentials } from "@paperclipai/adapter-utils/remote-credentials";
 
 export interface GrokModelsProbe {
   authenticated: boolean;
@@ -116,6 +117,7 @@ export async function testEnvironment(
   const command = asString(config.command, "grok");
   const target = ctx.executionTarget ?? null;
   const targetIsRemote = target?.kind === "remote";
+  const nativeSshCredentials = usesNativeSshCredentials(config, target);
   const targetIsSandbox = target?.kind === "remote" && target.transport === "sandbox";
   const cwd = resolveAdapterExecutionTargetCwd(target, asString(config.cwd, ""), process.cwd());
   const targetLabel = targetIsRemote
@@ -157,7 +159,7 @@ export async function testEnvironment(
   let runtimeWorkspaceLocalDir: string | undefined;
   let restore: (() => Promise<void>) | undefined;
   try {
-    if (config.managedAiConnection && targetIsRemote) {
+    if (config.managedAiConnection && targetIsRemote && !nativeSshCredentials) {
       try {
         const hostHome = env.GROK_HOME;
         stagedHome = await stageGrokHomeForSync(hostHome, { runId });
@@ -195,6 +197,7 @@ export async function testEnvironment(
       }
     }
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  if (nativeSshCredentials && !env.GROK_HOME) delete runtimeEnv.GROK_HOME;
 
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);

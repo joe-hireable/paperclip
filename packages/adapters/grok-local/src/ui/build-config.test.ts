@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { buildGrokLocalConfig } from "./build-config.js";
 
 describe("buildGrokLocalConfig", () => {
+  it("persists an explicit SSH credential mode and omits the default", () => {
+    expect(buildGrokLocalConfig({ remoteCredentials: "native" } as never)).toMatchObject({ remoteCredentials: "native" });
+    expect(buildGrokLocalConfig({} as never)).not.toHaveProperty("remoteCredentials");
+  });
+
   it("maps create-form values into adapter config", () => {
     expect(buildGrokLocalConfig({
       cwd: "/tmp/project",

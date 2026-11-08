@@ -21,5 +21,8 @@ export function buildGrokLocalConfig(v: CreateConfigValues): Record<string, unkn
 
   if (v.command) ac.command = v.command;
   if (v.extraArgs) ac.extraArgs = parseCommaArgs(v.extraArgs);
+  if (v.remoteCredentials === "native" || v.remoteCredentials === "managed") {
+    ac.remoteCredentials = v.remoteCredentials;
+  }
   return ac;
 }

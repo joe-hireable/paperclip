@@ -116,6 +116,10 @@ import {
   resolveCodexExecutionEngineForRun,
 } from "./acp.js";
 import { codexShellEnvironmentKeys } from "@paperclipai/adapter-utils/codex-shell-environment";
+import {
+  readConfiguredRemoteHome,
+  usesNativeSshCredentials,
+} from "@paperclipai/adapter-utils/remote-credentials";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const executeCodexAcp = createCodexAcpExecutor();
@@ -652,8 +656,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   const envConfig = parseObject(config.env);
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
-  let configuredCodexHome =
-    typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
+  // SSH-only. Sandbox runs keep staging the controller login even when this
+  // is set, because a sandbox has no persistent host login of its own.
+  const nativeSshCredentials = usesNativeSshCredentials(config, executionTarget);
+  const nativeRemoteCodexHome = nativeSshCredentials
+    ? readConfiguredRemoteHome(envConfig, "CODEX_HOME")
+    : null;
+  let configuredCodexHome = nativeSshCredentials
+    ? null
+    : typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
       : null;
   const configuredOpenAiApiKey =
@@ -675,10 +686,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         .map(entry => [entry.key, entry.source]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
     })).digest("hex")
     : connectorSkillDigest;
-  const runtimeCredentialHome = runtimeSkillDigest
+  const runtimeCredentialHome = !nativeSshCredentials && runtimeSkillDigest
     ? skillSourceHome ?? await prepareManagedCodexHome(process.env, onLog, agent.companyId, { apiKey: configuredOpenAiApiKey })
     : null;
-  if (runtimeSkillDigest) {
+  if (!nativeSshCredentials && runtimeSkillDigest) {
     const credentialHome = runtimeCredentialHome!;
     const credentialBytes = await fs.readFile(path.join(credentialHome, "auth.json")).catch(() => null);
     const selectedConfig = await fs.readFile(path.join(credentialHome, "config.toml")).catch(() => null);
@@ -715,7 +726,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // holds no credential it does nothing (no random pick). This keeps the change
   // additive: the managed home still symlinks the shared `auth.json`, now at its
   // freshest same-identity copy. The off-switch (default on) skips the vend.
-  if (!config.managedAiConnection && isCodexAuthCacheEnabled(process.env)) {
+  if (!nativeSshCredentials && !config.managedAiConnection && isCodexAuthCacheEnabled(process.env)) {
     const sharedHomeAuthPath = path.join(resolveSharedCodexHomeDir(process.env), "auth.json");
     // This caller reads `process.env` directly and holds no separate `env`
     // object, so `selectVendCredential` falls back to its own `process.env`
@@ -734,12 +745,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       void error;
     });
   }
-  if (configuredCodexHome == null) {
+  if (!nativeSshCredentials && configuredCodexHome == null) {
     await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
       apiKey: configuredOpenAiApiKey,
     });
   }
-  if (configuredHomeIsManaged && configuredCodexHome) {
+  if (!nativeSshCredentials && configuredHomeIsManaged && configuredCodexHome) {
     const seedEnv = runtimeSkillDigest ? {
       ...process.env, CODEX_HOME: runtimeCredentialHome ?? resolveManagedCodexHomeDir(process.env, agent.companyId),
     } : process.env;
@@ -749,7 +760,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
-  await fs.mkdir(effectiveCodexHome, { recursive: true });
+  if (!nativeSshCredentials) {
+    await fs.mkdir(effectiveCodexHome, { recursive: true });
+  }
 
   // Never launch a managed CODEX_HOME with no credentials. Without auth.json
   // and with OPENAI_API_KEY="" the provider rejects every request with
@@ -761,16 +774,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // and sandbox targets are additionally allowed to supply their own login
   // (the pre-dispatch gate defers sandbox-destined runs here for exactly that
   // probe).
-  await assertCodexCredentialsLaunchable({
-    runId,
-    companyId: agent.companyId,
-    configuredCodexHome,
-    configuredApiKey: configuredOpenAiApiKey,
-    effectiveCodexHome,
-    target: executionTarget,
-    cwd,
-    onLog,
-  });
+  if (nativeSshCredentials) {
+    await onLog(
+      "stdout",
+      "[paperclip] Using the SSH host's own Codex login. No auth file will be staged or copied back.\n",
+    );
+  } else {
+    await assertCodexCredentialsLaunchable({
+      runId,
+      companyId: agent.companyId,
+      configuredCodexHome,
+      configuredApiKey: configuredOpenAiApiKey,
+      effectiveCodexHome,
+      target: executionTarget,
+      cwd,
+      onLog,
+    });
+  }
   // Merge custom model providers (PAPERCLIP_CODEX_PROVIDERS) into the managed
   // CODEX_HOME's config.toml BEFORE the home is shipped to a remote execution
   // target, so both local and sandboxed Codex processes pick up the routing.
@@ -783,7 +803,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const preparedRuntimeConfig = await prepareCodexRuntimeConfig({
     env: envConfigStrings,
-    codexHome: configuredCodexHome && !runtimeSkillDigest ? null : effectiveCodexHome,
+    codexHome: nativeSshCredentials || (configuredCodexHome && !runtimeSkillDigest) ? null : effectiveCodexHome,
   });
   // Curated allowlist dir staged for the remote `home` asset (see below). Held
   // here so the outer `finally` can remove it on every exit path (teardown and
@@ -792,7 +812,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let observabilityProfile: Awaited<ReturnType<typeof prepareCodexObservabilityProfile>> | null = null;
   let observabilityPreparationFailed = false;
   try {
-    if (ctx.observability) {
+    if (ctx.observability && nativeSshCredentials) {
+      await onLog("stderr", "[paperclip] Company observability is unavailable when SSH remote credentials are native.\n");
+    } else if (ctx.observability) {
       if (isManagedCodexHomePath(process.env, agent.companyId, effectiveCodexHome)) {
         try {
           observabilityProfile = await prepareCodexObservabilityProfile({ home: effectiveCodexHome, runId,
@@ -816,12 +838,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       runtimeMcpGateways,
       managedMcpGatewaysFromContext(context),
     );
-    const managedMcp = await writeManagedCodexMcpConfig({
-      codexHome: effectiveCodexHome,
-      apiBaseUrl: paperclipBaseEnv.PAPERCLIP_API_URL,
-      gateways: managedMcpGateways,
-    });
-    if (managedMcpGateways.length > 0) {
+    const managedMcp = nativeSshCredentials
+      ? { configPath: "", warnings: [] as string[] }
+      : await writeManagedCodexMcpConfig({
+          codexHome: effectiveCodexHome,
+          apiBaseUrl: paperclipBaseEnv.PAPERCLIP_API_URL,
+          gateways: managedMcpGateways,
+        });
+    if (!nativeSshCredentials && managedMcpGateways.length > 0) {
       await onLog(
         "stdout",
         `[paperclip] Wrote ${managedMcpGateways.length} managed MCP gateway(s) into Codex config "${managedMcp.configPath}".\n`,
@@ -832,15 +856,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     // Inject skills into the same CODEX_HOME that Codex will actually run with
     // (managed home in the default case, or an explicit override from adapter config).
-    const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
-    await ensureCodexSkillsInjected(
-      onLog,
-      {
-        skillsHome: codexSkillsDir,
-        skillsEntries: codexSkillEntries,
-        desiredSkillNames,
-      },
-    );
+    if (!nativeSshCredentials) {
+      const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
+      await ensureCodexSkillsInjected(
+        onLog,
+        {
+          skillsHome: codexSkillsDir,
+          skillsEntries: codexSkillEntries,
+          desiredSkillNames,
+        },
+      );
+    }
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
       asNumber(config.timeoutSec, 0),
@@ -853,7 +879,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? await (async () => {
           await onLog(
             "stdout",
-            `[paperclip] Syncing ${targetWorkspaceRealization?.mode === "in_place" ? "CODEX_HOME" : "workspace and CODEX_HOME"} to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+            nativeSshCredentials
+              ? `[paperclip] Syncing workspace to ${describeAdapterExecutionTarget(executionTarget)}.\n`
+              : `[paperclip] Syncing ${targetWorkspaceRealization?.mode === "in_place" ? "CODEX_HOME" : "workspace and CODEX_HOME"} to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
           );
           // Stage only the files Codex actually needs into a curated temp dir and
           // ship THAT as the `home` asset, instead of the whole managed
@@ -863,7 +891,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           // the single-use `auth.json`) are dereferenced to bytes. This drops the
           // large runtime state (`sessions/`, `*.sqlite`, `plugins/`, …) that the
           // 4-name denylist missed and that a sandbox run never needs.
-          stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, { runId, additionalFiles: observabilityProfile ? [observabilityProfile.filename] : [] });
+          // Native SSH skips this: the remote Codex process uses its own home.
+          if (!nativeSshCredentials) {
+            stagedCodexHomeDir = await stageCodexHomeForSync(effectiveCodexHome, { runId, additionalFiles: observabilityProfile ? [observabilityProfile.filename] : [] });
+          }
           return await prepareAdapterExecutionTargetRuntime({
             runId,
             target: executionTarget,
@@ -879,7 +910,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             detectCommand: command,
             onProgress: (line) => onLog("stdout", line),
             onRuntimeProgress: ctx.onRuntimeProgress,
-            assets: [
+            assets: stagedCodexHomeDir ? [
               {
                 key: "home",
                 localDir: stagedCodexHomeDir,
@@ -917,7 +948,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 // ONLY the allowlisted files (auth/config/skills), so there is
                 // nothing to filter out.
               },
-            ],
+            ] : undefined,
           });
         })()
       : null;
@@ -931,7 +962,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
       : null;
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
-    const remoteCodexHome = executionTargetIsRemote
+    const remoteCodexHome = executionTargetIsRemote && !nativeSshCredentials
       ? preparedExecutionTargetRuntime?.assetDirs.home ??
         path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
       : null;
@@ -1020,7 +1051,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (runtimePrimaryUrl) {
       env.PAPERCLIP_RUNTIME_PRIMARY_URL = runtimePrimaryUrl;
     }
-    env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+    if (nativeSshCredentials) {
+      if (nativeRemoteCodexHome) env.CODEX_HOME = nativeRemoteCodexHome;
+      else delete env.CODEX_HOME;
+    } else {
+      env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+    }
     if (ctx.observability && (observabilityProfile || observabilityPreparationFailed)) applyObservabilityEnvironment(env, ctx.observability);
     if (authToken) {
       env.PAPERCLIP_API_KEY = authToken;
@@ -1046,6 +1082,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    if (nativeSshCredentials && !nativeRemoteCodexHome) {
+      delete effectiveEnv.CODEX_HOME;
+    }
     const managedBilling = resolveManagedOpenAiBilling(config.managedAiRouting);
     const billingType = managedBilling?.billingType ?? resolveCodexBillingType(effectiveEnv);
     const biller = managedBilling?.biller ?? resolveCodexBiller(effectiveEnv, billingType);
