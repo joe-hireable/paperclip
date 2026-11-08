@@ -485,6 +485,12 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     { timedOut: true, expected: "timed_out", errorCode: "timeout" },
     { signal: "SIGTERM", expected: "failed", errorCode: "adapter_failed" },
     { errorMessage: "provider quota", errorCode: "provider_quota", expected: "failed" },
+    {
+      exitCode: 0,
+      errorMessage: "The selected model is not supported by the current ChatGPT connection.",
+      errorCode: "adapter_model_unsupported",
+      expected: "failed",
+    },
   ])("keeps adapter outcome classification ($expected, $errorCode)", async ({ expected, ...result }) => {
     const f = await fixture();
     Object.assign(f.input.adapterResult, result);

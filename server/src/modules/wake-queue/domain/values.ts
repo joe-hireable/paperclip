@@ -31,6 +31,7 @@ export function isConfigurationIncompleteFailedRun(
     errorCode?.startsWith("routing_contract_") === true ||
     errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE ||
     errorCode === "model_not_found" ||
+    errorCode === "adapter_model_unsupported" ||
     errorCode === "native_provider_model_rejected"
   );
 }

@@ -69,6 +69,7 @@ import {
 import {
   parseCodexJsonl, createCodexJsonlParser,
   classifyCodexAuthRefreshFailure,
+  classifyCodexProviderApiError,
   extractCodexRetryNotBefore,
   isCodexHarnessCrash,
   isCodexProviderQuotaError,
@@ -1547,8 +1548,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         parsedError ||
         stderrLine ||
         `Codex exited with code ${attempt.proc.exitCode ?? -1}`;
+      const providerApiError = classifyCodexProviderApiError({
+        stdout: attempt.proc.stdout,
+        stderr: attempt.proc.stderr,
+        errorMessage: fallbackErrorMessage,
+      });
+      const processFailed = (attempt.proc.exitCode ?? 0) !== 0 || providerApiError != null;
+      const exitCode = providerApiError != null && (attempt.proc.exitCode ?? 0) === 0
+        ? 1
+        : attempt.proc.exitCode;
       const transientRetryNotBefore =
-        (attempt.proc.exitCode ?? 0) !== 0
+        processFailed
           ? extractCodexRetryNotBefore({
               stdout: attempt.proc.stdout,
               stderr: attempt.proc.stderr,
@@ -1556,7 +1566,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             })
           : null;
       const authRefreshFailure =
-        (attempt.proc.exitCode ?? 0) !== 0
+        processFailed
           ? classifyCodexAuthRefreshFailure({
               stdout: attempt.proc.stdout,
               stderr: attempt.proc.stderr,
@@ -1564,7 +1574,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             })
           : null;
       const providerQuota =
-        (attempt.proc.exitCode ?? 0) !== 0 &&
+        processFailed &&
         !authRefreshFailure &&
         isCodexProviderQuotaError({
           stdout: attempt.proc.stdout,
@@ -1572,7 +1582,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           errorMessage: fallbackErrorMessage,
         });
       const transientUpstream =
-        (attempt.proc.exitCode ?? 0) !== 0 &&
+        processFailed &&
         !authRefreshFailure &&
         !providerQuota &&
         isCodexTransientUpstreamError({
@@ -1585,24 +1595,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         !providerQuota &&
         !transientUpstream &&
         isCodexHarnessCrash({
-          exitCode: attempt.proc.exitCode,
+          exitCode,
           sawProtocolEvent: attempt.parsed.sawProtocolEvent,
           sawProtocolTerminalEvent: attempt.parsed.sawProtocolTerminalEvent,
         });
       const errorFamily =
         authRefreshFailure ??
+        providerApiError?.errorFamily ??
         (providerQuota ? "provider_quota" : transientUpstream || harnessCrash ? "transient_upstream" : null);
 
       return {
-        exitCode: attempt.proc.exitCode,
+        exitCode,
         signal: attempt.proc.signal,
         timedOut: false,
         usageComplete: attempt.parsed.usageComplete,
         costStatus: attempt.parsed.usageComplete ? undefined : "unpriced",
         errorMessage:
-          (attempt.proc.exitCode ?? 0) === 0
+          !processFailed
             ? null
-            : fallbackErrorMessage,
+            : providerApiError?.errorMessage ?? fallbackErrorMessage,
         errorCode:
           // Forward the transport-level error code from the run-disposition
           // seam first. A lost duplex control channel surfaces the typed
@@ -1611,6 +1622,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             ? attempt.proc.errorCode
             : authRefreshFailure
             ? authRefreshFailure
+            : providerApiError
+            ? providerApiError.errorCode
             : providerQuota
             ? "provider_quota"
             : transientUpstream

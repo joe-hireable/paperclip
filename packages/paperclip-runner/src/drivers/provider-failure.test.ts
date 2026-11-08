@@ -95,6 +95,41 @@ describe("provider failure boundary", () => {
       .toMatchObject({ category: "rate_limit", retryability: "unknown" });
   });
 
+  it("classifies a nested Codex 400 model_not_found object as model_unavailable", () => {
+    const message = "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.";
+    expect(codexProviderFailure({
+      type: "error",
+      status: 400,
+      error: { type: "invalid_request_error", code: "model_not_found", message },
+    }, "turn")).toMatchObject({
+      provider: "openai",
+      category: "model_unavailable",
+      httpStatus: 400,
+      providerCode: "model_not_found",
+      message,
+      retryability: "requires_action",
+    });
+  });
+
+  it("classifies nested Codex auth and other 4xx objects without leaking secrets", () => {
+    const auth = codexProviderFailure({
+      type: "error",
+      status: 401,
+      error: { type: "invalid_request_error", code: "invalid_api_key", message: "Incorrect API key provided: sk-ant-privatecredential123" },
+    }, "turn");
+    expect(auth).toMatchObject({ category: "authentication", httpStatus: 401, providerCode: "invalid_api_key" });
+    expect(JSON.stringify(auth)).not.toContain("privatecredential");
+    expect(codexProviderFailure({
+      type: "error",
+      status: 400,
+      error: { type: "invalid_request_error", message: "Unknown parameter: 'prompt_cache_retention'." },
+    }, "turn")).toMatchObject({
+      category: "invalid_request",
+      httpStatus: 400,
+      message: "Unknown parameter: 'prompt_cache_retention'.",
+    });
+  });
+
   it("extracts OpenCode API error fields without copying response bodies or headers", () => {
     const failure = openCodeProviderFailure({ name: "APIError", data: { message: "Service is busy.", statusCode: 503,
       responseBody: "private request", responseHeaders: { authorization: "secret" } } }, "openrouter");

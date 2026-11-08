@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyCodexAuthRefreshFailure,
+  classifyCodexProviderApiError,
   extractCodexRetryNotBefore,
   isCodexHarnessCrash,
   isCodexProviderQuotaError,
@@ -23,6 +24,22 @@ describe("parseCodexJsonl", () => {
       usageReported: true, usageComplete: true, usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
     });
   });
+  it("reads a nested Codex HTTP error message from a protocol error event", () => {
+    expect(parseCodexJsonl(JSON.stringify({
+      type: "error",
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        code: "model_not_found",
+        message: "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.",
+      },
+    }))).toMatchObject({
+      errorMessage: "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.",
+      sawProtocolEvent: true,
+      sawProtocolTerminalEvent: true,
+    });
+  });
+
   it("captures session id, assistant summary, usage, and error message", () => {
     const stdout = [
       JSON.stringify({ type: "thread.started", thread_id: "thread_123" }),
@@ -158,6 +175,92 @@ describe("isCodexHarnessCrash", () => {
         errorMessage: "agent gave up",
       }),
     ).toBe(false);
+  });
+});
+
+describe("classifyCodexProviderApiError", () => {
+  const chatgptRejection =
+    "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.";
+  const modelNotFoundJson = JSON.stringify({
+    type: "error",
+    status: 400,
+    error: {
+      type: "invalid_request_error",
+      code: "model_not_found",
+      message: chatgptRejection,
+    },
+  });
+
+  it("classifies a 400 model_not_found JSONL event as adapter_model_unsupported", () => {
+    expect(classifyCodexProviderApiError({ stdout: modelNotFoundJson })).toMatchObject({
+      errorCode: "adapter_model_unsupported",
+      errorFamily: "configuration",
+      errorMessage: chatgptRejection,
+      httpStatus: 400,
+    });
+  });
+
+  it("classifies the ChatGPT-account rejection after a model-metadata warning", () => {
+    expect(classifyCodexProviderApiError({
+      stderr: [
+        "WARNING: Model metadata for `gpt-5.1-codex` not found",
+        `ERROR: ${modelNotFoundJson}`,
+      ].join("\n"),
+    })).toMatchObject({
+      errorCode: "adapter_model_unsupported",
+      errorMessage: chatgptRejection,
+    });
+  });
+
+  it("does not treat a model-metadata warning alone as a provider failure", () => {
+    expect(classifyCodexProviderApiError({
+      stderr: "WARNING: Model metadata for `gpt-5.1-codex` not found",
+    })).toBeNull();
+  });
+
+  it("does not classify agent discussion of a model error as a provider failure", () => {
+    expect(classifyCodexProviderApiError({
+      stdout: JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: chatgptRejection },
+      }),
+    })).toBeNull();
+  });
+
+  it("classifies a 401 JSON error as adapter_auth_failed and redacts secrets", () => {
+    const classified = classifyCodexProviderApiError({
+      stderr: JSON.stringify({
+        type: "error",
+        status: 401,
+        error: {
+          type: "invalid_request_error",
+          code: "invalid_api_key",
+          message: "Incorrect API key provided: sk-test-secret-value-12",
+        },
+      }),
+    });
+    expect(classified).toMatchObject({
+      errorCode: "adapter_auth_failed",
+      errorFamily: "configuration",
+      httpStatus: 401,
+    });
+    expect(classified?.errorMessage).toContain("Incorrect API key provided");
+    expect(classified?.errorMessage).not.toContain("sk-test-secret-value-12");
+  });
+
+  it("classifies other 4xx turn errors as adapter_provider_http_error", () => {
+    expect(classifyCodexProviderApiError({
+      stdout: JSON.stringify({
+        type: "error",
+        status: 400,
+        error: { type: "invalid_request_error", message: "Unknown parameter: 'prompt_cache_retention'." },
+      }),
+    })).toMatchObject({
+      errorCode: "adapter_provider_http_error",
+      errorFamily: "configuration",
+      httpStatus: 400,
+      errorMessage: "Unknown parameter: 'prompt_cache_retention'.",
+    });
   });
 });
 
