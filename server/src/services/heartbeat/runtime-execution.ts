@@ -934,6 +934,9 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           });
           return;
         }
+        if (!onAdapterMeta) {
+          return;
+        }
         return onAdapterMeta(meta);
       };
       const guardedDispatch =

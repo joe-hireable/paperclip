@@ -2952,11 +2952,13 @@ export function heartbeatService(
           await options.beforeResolvedInteractionContinuationDispatchCheck?.({ runId: run.id, issueId });
           await options.afterResolvedInteractionContinuationDispatchCheck?.({ runId: run.id, issueId });
         }
-        if (coordinatorState) {
+        const admittedCoordinator = coordinatorState;
+        if (admittedCoordinator) {
+          const attemptId = admittedCoordinator.attempt.id;
           await db.transaction((tx) =>
             assertCoordinatorRunAdmission(tx as unknown as Db, {
               companyId: run.companyId,
-              attemptId: coordinatorState.attempt.id,
+              attemptId,
               agentId: run.agentId,
               runId: run.id,
             }),
