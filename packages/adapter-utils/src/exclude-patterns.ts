@@ -9,6 +9,14 @@ function pathContainsSegmentOrDescendant(relative: string, segment: string): boo
     relative.includes(`/${segment}/`);
 }
 
+function globMatches(value: string, pattern: string): boolean {
+  const expression = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, "[^/]");
+  return new RegExp(`^${expression}$`).test(value);
+}
+
 export function excludePatternMatches(relative: string, pattern: string): boolean {
   if (pattern.startsWith("*/") && pattern.endsWith("/*")) {
     return pathContainsSegmentOrDescendant(relative, pattern.slice(2, -2));
@@ -19,6 +27,10 @@ export function excludePatternMatches(relative: string, pattern: string): boolea
   if (pattern.endsWith("/*")) {
     const base = pattern.slice(0, -2);
     return relative.startsWith(`${base}/`);
+  }
+  if (pattern.includes("*") || pattern.includes("?")) {
+    const base = relative.slice(relative.lastIndexOf("/") + 1);
+    return globMatches(relative, pattern) || globMatches(base, pattern);
   }
   return isRelativePathOrDescendant(relative, pattern);
 }

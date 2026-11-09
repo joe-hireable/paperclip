@@ -736,7 +736,7 @@ describe("ssh env-lab fixture", () => {
     const config = await buildSshEnvLabFixtureConfig(started);
     const input = { spec: { ...config, remoteCwd: started.workspaceDir }, localDir,
       remoteDir: started.workspaceDir, workspaceFileMode: "all" as const };
-    expect(await prepareWorkspaceForSshExecution(input)).toEqual({ gitBacked: false });
+    expect(await prepareWorkspaceForSshExecution(input)).toEqual(expect.objectContaining({ gitBacked: false }));
     expect(await readFile(path.join(started.workspaceDir, "node_modules", "personal.bin"))).toEqual(binary);
     await rm(path.join(localDir, "removed.txt"));
     await prepareWorkspaceForSshExecution(input);
@@ -993,7 +993,7 @@ describe("ssh env-lab fixture", () => {
       localDir: localRepo,
       remoteDir: started.workspaceDir,
     });
-    expect(prepared).toEqual({ gitBacked: true, repositories: [nestedRelative] });
+    expect(prepared).toEqual(expect.objectContaining({ gitBacked: true, repositories: [nestedRelative] }));
 
     await runSshCommand(
       config,
@@ -1112,6 +1112,7 @@ describe("ssh env-lab fixture", () => {
       .toBe("from run a\n");
     await expect(readFile(path.join(localRepo, "manual-qa/environment-matrix/ssh/codex_local.md"), "utf8")).resolves
       .toBe("from run b\n");
+    expect(await git(localRepo, ["diff", "--cached", "--name-status"])).toBe("");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("round-trips remote git commits through the managed runtime restore path", async () => {
@@ -1153,6 +1154,8 @@ describe("ssh env-lab fixture", () => {
 
     expect(await git(localRepo, ["log", "-1", "--pretty=%s"])).toBe("remote update");
     await expect(readFile(path.join(localRepo, "tracked.txt"), "utf8")).resolves.toBe("dirty remote\n");
+    expect(await git(localRepo, ["diff", "--cached", "--name-status"])).toBe("");
+    expect(await git(localRepo, ["diff", "--name-status", "HEAD"])).toBe("M\ttracked.txt");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("propagates remote commits to the local worktree with no git remote configured (no-remote-git contract)", async () => {
@@ -1270,6 +1273,9 @@ describe("ssh env-lab fixture", () => {
     await expect(readFile(path.join(localRepo, "run-a.txt"), "utf8")).resolves.toBe("from run a\n");
     await expect(readFile(path.join(localRepo, "run-b.txt"), "utf8")).resolves.toBe("from run b\n");
     expect(await git(localRepo, ["log", "-1", "--pretty=%s"])).toContain("Paperclip SSH sync merge");
+    expect(await git(localRepo, ["diff", "--cached", "--name-status"])).toBe("");
+    expect(await git(localRepo, ["ls-files", "--", "run-a.txt"])).toBe("run-a.txt");
+    expect(await git(localRepo, ["ls-files", "--", "run-b.txt"])).toBe("run-b.txt");
 
     const recentSubjects = await git(localRepo, ["log", "--pretty=%s", "-3"]);
     expect(recentSubjects).toContain("remote update a");

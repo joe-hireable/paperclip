@@ -1519,6 +1519,13 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   // counters without further changes here.
   onProgress?: RuntimeProgressSink;
   onRuntimeProgress?: RuntimeStatusSink;
+  signal?: AbortSignal;
+  transferLimits?: { maxBytes?: number; maxEntries?: number };
+  /**
+   * SSH only. Use this existing remote directory and do not upload the
+   * controller tree. Validation failure throws before any transfer.
+   */
+  attachExistingRemoteCwd?: { remoteCwd: string; allowedRoot: string } | null;
   // Optional host span runner for the workspace tarball build. Only the confined
   // sandbox lane uses it: it forwards the runner to prepareCommandManagedRuntime
   // so the host pack time rides one `pack` span under the `stage.sync` step. The
@@ -1557,6 +1564,9 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
       assets: input.assets,
       additionalSources: input.additionalSources,
       onProgress: input.onProgress,
+      signal: input.signal,
+      transferLimits: input.transferLimits,
+      attachExistingRemoteCwd: input.attachExistingRemoteCwd,
     });
     return {
       target,

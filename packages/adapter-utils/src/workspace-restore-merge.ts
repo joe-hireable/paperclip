@@ -5,6 +5,16 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createWorkspaceManifest, WorkspaceManifestMap, workspacePathMatcher, type PathManifest, type WorkspacePaths, type WorkspaceManifestWriter } from "./workspace-manifest.js";
 import { shouldExcludePath } from "./exclude-patterns.js";
+
+/** Raised when an operator cancel reaches a workspace walk or sync before it finishes. */
+export class WorkspaceOperationAbortedError extends Error {
+  readonly code = "WORKSPACE_SYNC_ABORTED";
+
+  constructor(message = "Workspace sync was cancelled before it finished.") {
+    super(message);
+    this.name = "WorkspaceOperationAbortedError";
+  }
+}
 import { runSnapshotThread } from "./workspace-snapshot-thread.js";
 import type { WorkspaceRestoreDiagnostic } from "./workspace-restore-diagnostics.js";
 
@@ -148,6 +158,7 @@ const isVanishedEntry = (error: unknown) => (error as NodeJS.ErrnoException | nu
 
 async function* walkDirectory(
   root: string, exclude: readonly string[], ignored: ReturnType<typeof workspacePathMatcher>, relative = "",
+  signal?: AbortSignal,
 ): AsyncGenerator<[string, SnapshotEntry]> {
   const readEntry = async (nextRelative: string): Promise<[string, SnapshotEntry | null]> => {
     const fullPath = path.join(root, nextRelative);
@@ -169,7 +180,7 @@ async function* walkDirectory(
       const [nextRelative, entry] = result.value;
       if (!entry) continue;
       yield [nextRelative, entry];
-      if (entry.kind === "dir") yield* walkDirectory(root, exclude, ignored, nextRelative);
+      if (entry.kind === "dir") yield* walkDirectory(root, exclude, ignored, nextRelative, signal);
     }
   };
   const current = relative ? path.join(root, relative) : root;
@@ -180,6 +191,7 @@ async function* walkDirectory(
   if (!dir) return;
   let batch: string[] = [];
   for await (const entry of dir) {
+    if (signal?.aborted) throw new WorkspaceOperationAbortedError();
     const nextRelative = relative ? path.posix.join(relative, entry.name) : entry.name;
     if (shouldExcludePath(nextRelative, exclude) || ignored.matches(nextRelative)) continue;
     batch.push(nextRelative);
@@ -227,6 +239,10 @@ function entriesMatch(left: SnapshotEntry | null | undefined, right: SnapshotEnt
     return left.mode === right.mode && left.hash === right.hash;
   }
   return false;
+}
+
+function fileHash(entry: SnapshotEntry | null | undefined): string | null {
+  return entry?.kind === "file" ? entry.hash : null;
 }
 
 function directorySnapshotsMatch(left: DirectorySnapshot, right: DirectorySnapshot): boolean {
@@ -639,7 +655,7 @@ async function copySnapshotEntry(sourceDir: string, targetDir: string, relative:
 
 export async function captureDirectorySnapshot(
   rootDir: string,
-  options: { exclude?: string[]; ignoredPaths?: WorkspacePaths; diskBacked?: boolean } = {},
+  options: { exclude?: string[]; ignoredPaths?: WorkspacePaths; diskBacked?: boolean; signal?: AbortSignal } = {},
 ): Promise<DirectorySnapshot> {
   const exclude = [...new Set(options.exclude ?? [])];
   const ignored = workspacePathMatcher(options.ignoredPaths);
@@ -647,7 +663,8 @@ export async function captureDirectorySnapshot(
   try {
     writer = options.diskBacked ? await createWorkspaceManifest("paperclip-workspace-baseline-") : null;
     const memory = new Map<string, SnapshotEntry>();
-    for await (const [relative, entry] of walkDirectory(rootDir, exclude, ignored)) {
+    if (options.signal?.aborted) throw new WorkspaceOperationAbortedError();
+    for await (const [relative, entry] of walkDirectory(rootDir, exclude, ignored, "", options.signal)) {
       if (writer) writer.add("baseline", relative, JSON.stringify(entry));
       else memory.set(relative, entry);
     }
@@ -761,13 +778,16 @@ export async function mergeDirectoryWithBaseline(input: {
   workspaceSnapshotIsolation?: "worker";
   beforeApply?: () => Promise<void>;
   afterApply?: () => Promise<void>;
+  signal?: AbortSignal;
   /** Caller holds the target's writer lock and validated an immutable sparse
    * source. Unchanged entries need no payload and are never copied. */
   snapshots?: { source: DirectorySnapshot; current?: DirectorySnapshot };
 }): Promise<void> {
-  const capture = input.workspaceSnapshotIsolation === "worker" ? captureDirectorySnapshotOffThread : captureDirectorySnapshot;
-  const options = { exclude: input.baseline.exclude, ignoredPaths: input.baseline.ignoredPaths, diskBacked: true };
-  const source = input.snapshots?.source ?? await capture(input.sourceDir, options);
+  if (input.signal?.aborted) throw new WorkspaceOperationAbortedError();
+  const options = { exclude: input.baseline.exclude, ignoredPaths: input.baseline.ignoredPaths, diskBacked: true as const };
+  const source = input.snapshots?.source ?? (input.workspaceSnapshotIsolation === "worker"
+    ? await captureDirectorySnapshotOffThread(input.sourceDir, options)
+    : await captureDirectorySnapshot(input.sourceDir, { ...options, signal: input.signal }));
   try {
     await withDirectoryMergeLock(input.targetDir, async (canonicalTargetDir) => {
       await input.beforeApply?.();
@@ -777,8 +797,11 @@ export async function mergeDirectoryWithBaseline(input: {
       }
       // Strict preflight must see excluded children before a directory is
       // replaced. The merge still applies only the filtered source/baseline.
-      const current = input.snapshots?.current ?? await capture(canonicalTargetDir,
-        input.conflictPolicy === "reject" ? { exclude: [], diskBacked: true } : options);
+      const current = input.snapshots?.current ?? (input.workspaceSnapshotIsolation === "worker"
+        ? await captureDirectorySnapshotOffThread(canonicalTargetDir, input.conflictPolicy === "reject" ? { exclude: [], diskBacked: true } : options)
+        : await captureDirectorySnapshot(canonicalTargetDir, input.conflictPolicy === "reject"
+          ? { exclude: [], diskBacked: true, signal: input.signal }
+          : { ...options, signal: input.signal }));
       try {
         if (input.conflictPolicy === "reject") {
           const conflicts = directoryMergeConflicts(input.baseline, source, current);
@@ -796,8 +819,17 @@ export async function mergeDirectoryWithBaseline(input: {
           });
         }
         for (const [relative, entry] of orderedEntries(source)) {
-          if (!entriesMatch(input.baseline.entries.get(relative), entry) &&
-              !(input.conflictPolicy === "reject" && entriesMatch(current.entries.get(relative), entry))) await copySnapshotEntry(input.sourceDir, canonicalTargetDir, relative, entry);
+          const baselineEntry = input.baseline.entries.get(relative);
+          if (entriesMatch(baselineEntry, entry)) continue;
+          if (input.conflictPolicy === "reject" && entriesMatch(current.entries.get(relative), entry)) continue;
+          // Tar extract applies the receiver's umask, so a file the remote did
+          // not edit can still differ by mode. Replacing it would discard a
+          // local edit or deletion made after the baseline.
+          const remoteBytes = fileHash(entry);
+          if (remoteBytes !== null && remoteBytes === fileHash(baselineEntry) && fileHash(current.entries.get(relative)) !== remoteBytes) {
+            continue;
+          }
+          await copySnapshotEntry(input.sourceDir, canonicalTargetDir, relative, entry);
         }
         await input.afterApply?.();
       } finally { await disposeDirectorySnapshot(current); }

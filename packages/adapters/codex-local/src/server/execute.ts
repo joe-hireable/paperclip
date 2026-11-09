@@ -872,6 +872,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       asNumber(config.timeoutSec, 0),
     );
     const graceSec = asNumber(config.graceSec, 20);
+    const explicitRemoteCwd = configuredCwd.startsWith("/") ? configuredCwd : "";
+    const reuseExistingRemoteWorkspace =
+      asString(workspaceContext.mode, "") === "shared_workspace" ||
+      asString(workspaceContext.executionWorkspacePreference, "") === "reuse_existing";
+    const sshExecutionSpec =
+      executionTarget?.kind === "remote" && executionTarget.transport === "ssh" ? executionTarget.spec : null;
+    const attachExistingRemoteCwd =
+      sshExecutionSpec && explicitRemoteCwd.length > 0 && reuseExistingRemoteWorkspace
+        ? {
+            remoteCwd: explicitRemoteCwd,
+            allowedRoot: sshExecutionSpec.remoteWorkspacePath || sshExecutionSpec.remoteCwd,
+          }
+        : null;
     let effectiveExecutionCwd = targetWorkspaceRealization?.mode === "in_place"
       ? targetWorkspaceRealization.authoritativeRoot
       : adapterExecutionTargetRemoteCwd(executionTarget, cwd);
@@ -879,9 +892,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? await (async () => {
           await onLog(
             "stdout",
-            nativeSshCredentials
-              ? `[paperclip] Syncing workspace to ${describeAdapterExecutionTarget(executionTarget)}.\n`
-              : `[paperclip] Syncing ${targetWorkspaceRealization?.mode === "in_place" ? "CODEX_HOME" : "workspace and CODEX_HOME"} to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+            attachExistingRemoteCwd
+              ? `[paperclip] Attaching existing remote workspace; controller source will not be uploaded.\n`
+              : nativeSshCredentials
+                ? `[paperclip] Syncing workspace to ${describeAdapterExecutionTarget(executionTarget)}.\n`
+                : `[paperclip] Syncing ${targetWorkspaceRealization?.mode === "in_place" ? "CODEX_HOME" : "workspace and CODEX_HOME"} to ${describeAdapterExecutionTarget(executionTarget)}.\n`,
           );
           // Stage only the files Codex actually needs into a curated temp dir and
           // ship THAT as the `home` asset, instead of the whole managed
@@ -900,12 +915,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             target: executionTarget,
             adapterKey: "codex",
             timeoutSec,
-            workspaceLocalDir: cwd,
-            workspaceRemoteDir:
-              targetWorkspaceRealization?.mode === "in_place"
+            workspaceLocalDir:
+              attachExistingRemoteCwd && cwd === explicitRemoteCwd
+                ? (workspaceCwd && workspaceCwd !== explicitRemoteCwd ? workspaceCwd : process.cwd())
+                : cwd,
+            workspaceRemoteDir: attachExistingRemoteCwd
+              ? undefined
+              : targetWorkspaceRealization?.mode === "in_place"
                 ? targetWorkspaceRealization.authoritativeRoot
                 : undefined,
-            syncWorkspace: targetWorkspaceRealization?.mode !== "in_place",
+            syncWorkspace: attachExistingRemoteCwd ? false : targetWorkspaceRealization?.mode !== "in_place",
+            signal: ctx.signal,
+            attachExistingRemoteCwd,
             installCommand: SANDBOX_INSTALL_COMMAND,
             detectCommand: command,
             onProgress: (line) => onLog("stdout", line),
@@ -1041,6 +1062,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (targetWorkspaceRealization) {
       env.PAPERCLIP_WORKSPACE_REALIZATION_MODE = targetWorkspaceRealization.mode;
       env.PAPERCLIP_WORKSPACE_AUTHORITATIVE_ROOT = targetWorkspaceRealization.authoritativeRoot;
+    }
+    if (attachExistingRemoteCwd && preparedExecutionTargetRuntime?.workspaceRemoteDir) {
+      env.PAPERCLIP_WORKSPACE_REALIZATION_MODE = "in_place";
+      env.PAPERCLIP_WORKSPACE_AUTHORITATIVE_ROOT = preparedExecutionTargetRuntime.workspaceRemoteDir;
     }
     if (runtimeServiceIntents.length > 0) {
       env.PAPERCLIP_RUNTIME_SERVICE_INTENTS_JSON = JSON.stringify(runtimeServiceIntents);

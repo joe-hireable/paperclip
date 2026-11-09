@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { execFile, spawn } from "node:child_process";
-import { constants as fsConstants, createReadStream, createWriteStream, promises as fs } from "node:fs";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { constants as fsConstants, createReadStream, createWriteStream, promises as fs, rmSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -16,13 +16,104 @@ import {
 } from "./git-workspace-sync.js";
 import type { RunProcessResult } from "./server-utils.js";
 import type { DirectorySnapshot } from "./workspace-restore-merge.js";
-import { mergeDirectoryWithBaseline } from "./workspace-restore-merge.js";
+import { mergeDirectoryWithBaseline, WorkspaceOperationAbortedError } from "./workspace-restore-merge.js";
+import { shouldExcludePath } from "./exclude-patterns.js";
+import { resolveReferencedSourceIgnore } from "./sandbox-managed-runtime.js";
 import {
   createRuntimeProgressReporter,
   type RuntimeProgressDirection,
   type RuntimeProgressPhase,
   type RuntimeProgressSink,
 } from "./runtime-progress.js";
+
+export { WorkspaceOperationAbortedError };
+
+/** The copy exceeded the enforced size or entry ceiling. Nothing was transferred. */
+export class WorkspaceSyncLimitError extends Error {
+  readonly code = "WORKSPACE_SYNC_LIMIT";
+
+  constructor(
+    message: string,
+    readonly observed: { bytes: number; entries: number },
+    readonly limit: { maxBytes: number; maxEntries: number },
+  ) {
+    super(message);
+    this.name = "WorkspaceSyncLimitError";
+  }
+}
+
+/** An existing remote directory could not be attached. Copy is not a fallback. */
+export class RemoteWorkspaceAttachError extends Error {
+  readonly code = "REMOTE_WORKSPACE_UNAVAILABLE";
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "RemoteWorkspaceAttachError";
+  }
+}
+
+/** Hard ceiling for one workspace upload. Callers may only lower it. */
+export const SSH_WORKSPACE_SYNC_MAX_BYTES = 512 * 1024 * 1024;
+export const SSH_WORKSPACE_SYNC_MAX_ENTRIES = 100_000;
+const SYNC_CANCEL_GRACE_MS = 2_000;
+
+export const SSH_WORKSPACE_HEAVY_DIR_NAMES = [
+  "node_modules",
+  "vendor",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  ".next",
+  ".turbo",
+  ".cache",
+  ".venv",
+  "__pycache__",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".parcel-cache",
+] as const;
+
+/**
+ * Basename globs that never enter a workspace archive. A caller exclude list
+ * and a gitignore negation cannot put these back.
+ */
+export const SSH_WORKSPACE_SECRET_EXCLUDES = [
+  ".env",
+  ".env.*",
+  ".npmrc",
+  ".netrc",
+  ".pypirc",
+  "auth.json",
+  "credentials",
+  "credentials.json",
+  "id_rsa",
+  "id_dsa",
+  "id_ecdsa",
+  "id_ed25519",
+  "*.pem",
+  "*.key",
+  "*.p12",
+  "*.pfx",
+] as const;
+
+/**
+ * Secret names are basenames. `shouldExcludePath` treats a slashless name as
+ * an exact path, so a nested `config/credentials.json` would stay in the
+ * baseline and a restore would delete the local copy when the remote omits it.
+ * A star-slash prefix matches that basename at any depth. Tar still receives the
+ * original slashless name, which it applies to every path segment.
+ */
+function secretTransferExcludes(): string[] {
+  const patterns: string[] = [];
+  for (const pattern of SSH_WORKSPACE_SECRET_EXCLUDES) {
+    patterns.push(pattern);
+    if (!pattern.includes("/") && !pattern.includes("*") && !pattern.includes("?")) {
+      patterns.push(`*/${pattern}`);
+    }
+  }
+  return patterns;
+}
 
 export interface SshConnectionConfig {
   host: string;
@@ -190,12 +281,22 @@ export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionS
   };
 }
 
+function isSyncAbort(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (!error || typeof error !== "object") return false;
+  const name = (error as { name?: unknown }).name;
+  const code = (error as { code?: unknown }).code;
+  return name === "AbortError" || code === "ABORT_ERR";
+}
+
 async function execFileText(
   file: string,
   args: string[],
   options: {
     timeout?: number;
     maxBuffer?: number;
+    signal?: AbortSignal;
+    env?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<SshCommandResult> {
   return await new Promise<SshCommandResult>((resolve, reject) => {
@@ -205,9 +306,15 @@ async function execFileText(
       {
         timeout: options.timeout ?? 15_000,
         maxBuffer: options.maxBuffer ?? 1024 * 128,
+        signal: options.signal,
+        env: options.env,
       },
       (error, stdout, stderr) => {
         if (error) {
+          if (isSyncAbort(error, options.signal)) {
+            reject(new WorkspaceOperationAbortedError());
+            return;
+          }
           reject(Object.assign(error, { stdout: stdout ?? "", stderr: stderr ?? "" }));
           return;
         }
@@ -227,12 +334,25 @@ async function spawnText(
     stdin?: string;
     timeout?: number;
     maxBuffer?: number;
+    signal?: AbortSignal;
   } = {},
 ): Promise<SshCommandResult> {
   return await new Promise<SshCommandResult>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new WorkspaceOperationAbortedError());
+      return;
+    }
     const child = spawn(file, args, {
+      detached: true,
       stdio: [options.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
     });
+    const onAbort = () => {
+      if (child.pid) {
+        try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+      }
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    child.on("close", () => options.signal?.removeEventListener("abort", onAbort));
 
     const maxBuffer = options.maxBuffer ?? 1024 * 128;
     let stdout = "";
@@ -301,6 +421,12 @@ async function spawnText(
 
     child.on("error", (error) => {
       clearTimers();
+      if (isSyncAbort(error, options.signal)) {
+        if (settled) return;
+        settled = true;
+        reject(new WorkspaceOperationAbortedError());
+        return;
+      }
       finishReject(Object.assign(error, { code: null }));
     });
 
@@ -308,6 +434,10 @@ async function spawnText(
       clearTimers();
       if (settled) return;
       settled = true;
+      if (isSyncAbort(undefined, options.signal)) {
+        reject(new WorkspaceOperationAbortedError());
+        return;
+      }
       if (code === 0) {
         resolve({ stdout, stderr });
         return;
@@ -327,15 +457,77 @@ async function spawnText(
   });
 }
 
+function gitCommandEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  // A caller-level GIT_DIR would make `-C` write the snapshot into the wrong
+  // repository. The index override is explicit and must survive.
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  if (!extra?.GIT_INDEX_FILE) delete env.GIT_INDEX_FILE;
+  if (!extra?.GIT_OBJECT_DIRECTORY) delete env.GIT_OBJECT_DIRECTORY;
+  if (!extra?.GIT_ALTERNATE_OBJECT_DIRECTORIES) delete env.GIT_ALTERNATE_OBJECT_DIRECTORIES;
+  return env;
+}
+
 async function runLocalGit(
   localDir: string,
   args: string[],
   options: {
     timeout?: number;
     maxBuffer?: number;
+    env?: NodeJS.ProcessEnv;
+    stdin?: string | Buffer;
   } = {},
 ): Promise<SshCommandResult> {
-  return await execFileText("git", ["-C", localDir, ...args], options);
+  if (options.stdin == null && options.env == null) {
+    return await execFileText("git", ["-C", localDir, ...args], {
+      timeout: options.timeout,
+      maxBuffer: options.maxBuffer,
+      env: gitCommandEnv(),
+    });
+  }
+  const maxBuffer = options.maxBuffer ?? 1024 * 128;
+  return await new Promise<SshCommandResult>((resolve, reject) => {
+    const child = spawn("git", ["-C", localDir, ...args], {
+      env: gitCommandEnv(options.env),
+      stdio: [options.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timeout: NodeJS.Timeout | null = null;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (error) reject(Object.assign(error, { stdout, stderr }));
+      else resolve({ stdout, stderr });
+    };
+    if (options.timeout && options.timeout > 0) {
+      timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(new Error(`git ${args[0] ?? "command"} timed out`));
+      }, options.timeout);
+    }
+    const append = (streamName: "stdout" | "stderr", chunk: unknown) => {
+      const text = String(chunk);
+      if (streamName === "stdout") stdout += text;
+      else stderr += text;
+      if (Buffer.byteLength(stdout, "utf8") > maxBuffer || Buffer.byteLength(stderr, "utf8") > maxBuffer) {
+        child.kill("SIGKILL");
+        finish(new Error(`git ${args[0] ?? "command"} output exceeded maxBuffer of ${maxBuffer} bytes.`));
+      }
+    };
+    child.stdout?.on("data", (chunk) => append("stdout", chunk));
+    child.stderr?.on("data", (chunk) => append("stderr", chunk));
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      if (code === 0) finish();
+      else finish(new Error(stderr.trim() || stdout.trim() || `git exited with code ${code ?? -1}`));
+    });
+    child.stdin?.on("error", () => {});
+    if (options.stdin != null && child.stdin) child.stdin.end(options.stdin);
+  });
 }
 
 async function commandExists(command: string): Promise<boolean> {
@@ -355,19 +547,53 @@ async function resolveCommandPath(command: string): Promise<string | null> {
   }
 }
 
+const activeAuthTempDirs = new Set<string>();
+let authTempExitHookInstalled = false;
+
+function installAuthTempExitHook(): void {
+  if (authTempExitHookInstalled) return;
+  authTempExitHookInstalled = true;
+  // runSshCommand's async cleanup does not run when the process exits
+  // mid-command. The hook is synchronous so those directories still go away.
+  process.on("exit", () => {
+    for (const dir of activeAuthTempDirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`Failed to remove SSH auth temp dir: ${message}\n`);
+      }
+    }
+  });
+}
+
 async function withTempFile(
   prefix: string,
   contents: string,
   mode: number,
 ): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  installAuthTempExitHook();
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  activeAuthTempDirs.add(dir);
   const filePath = path.join(dir, "payload");
   const normalizedContents = contents.endsWith("\n") ? contents : `${contents}\n`;
-  await fs.writeFile(filePath, normalizedContents, { mode, encoding: "utf8" });
+  try {
+    await fs.writeFile(filePath, normalizedContents, { mode, encoding: "utf8" });
+  } catch (error) {
+    activeAuthTempDirs.delete(dir);
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
   return {
     path: filePath,
     cleanup: async () => {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      try {
+        await fs.rm(dir, { recursive: true, force: true });
+        activeAuthTempDirs.delete(dir);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`SSH auth temp cleanup failed: ${message}`);
+      }
     },
   };
 }
@@ -376,6 +602,19 @@ async function createSshAuthArgs(
   config: Pick<SshConnectionConfig, "privateKey" | "knownHosts" | "strictHostKeyChecking">,
 ): Promise<{ args: string[]; cleanup: () => Promise<void> }> {
   const tempFiles: Array<() => Promise<void>> = [];
+  const cleanup = async () => {
+    const failures: string[] = [];
+    for (const release of tempFiles) {
+      try {
+        await release();
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (failures.length > 0) {
+      console.error(`SSH auth temp cleanup failed: ${failures.join("; ")}`);
+    }
+  };
   const sshArgs = [
     "-o",
     "BatchMode=yes",
@@ -385,28 +624,28 @@ async function createSshAuthArgs(
     `StrictHostKeyChecking=${config.strictHostKeyChecking ? "yes" : "no"}`,
   ];
 
-  if (config.strictHostKeyChecking) {
-    if (config.knownHosts) {
-      const knownHosts = await withTempFile("paperclip-ssh-known-hosts-", config.knownHosts, 0o600);
-      tempFiles.push(knownHosts.cleanup);
-      sshArgs.push("-o", `UserKnownHostsFile=${knownHosts.path}`);
+  try {
+    if (config.strictHostKeyChecking) {
+      if (config.knownHosts) {
+        const knownHosts = await withTempFile("paperclip-ssh-known-hosts-", config.knownHosts, 0o600);
+        tempFiles.push(knownHosts.cleanup);
+        sshArgs.push("-o", `UserKnownHostsFile=${knownHosts.path}`);
+      }
+    } else {
+      sshArgs.push("-o", "UserKnownHostsFile=/dev/null");
     }
-  } else {
-    sshArgs.push("-o", "UserKnownHostsFile=/dev/null");
+
+    if (config.privateKey) {
+      const privateKey = await withTempFile("paperclip-ssh-key-", config.privateKey, 0o600);
+      tempFiles.push(privateKey.cleanup);
+      sshArgs.push("-i", privateKey.path);
+    }
+  } catch (error) {
+    await cleanup();
+    throw error;
   }
 
-  if (config.privateKey) {
-    const privateKey = await withTempFile("paperclip-ssh-key-", config.privateKey, 0o600);
-    tempFiles.push(privateKey.cleanup);
-    sshArgs.push("-i", privateKey.path);
-  }
-
-  return {
-    args: sshArgs,
-    cleanup: async () => {
-      await Promise.all(tempFiles.map((cleanup) => cleanup()));
-    },
-  };
+  return { args: sshArgs, cleanup };
 }
 
 function tarExcludeArgs(exclude: string[] | undefined): string[] {
@@ -586,15 +825,36 @@ async function runSshScript(
 async function clearLocalDirectory(
   localDir: string,
   preserveEntries: string[] = [],
+  preserveRelative?: (relative: string) => boolean,
 ): Promise<void> {
   await fs.mkdir(localDir, { recursive: true });
   const preserve = new Set(preserveEntries);
-  const entries = await fs.readdir(localDir);
-  await Promise.all(
-    entries
-      .filter((entry) => !preserve.has(entry))
-      .map((entry) => fs.rm(path.join(localDir, entry), { recursive: true, force: true })),
-  );
+  if (!preserveRelative) {
+    const entries = await fs.readdir(localDir);
+    await Promise.all(
+      entries
+        .filter((entry) => !preserve.has(entry))
+        .map((entry) => fs.rm(path.join(localDir, entry), { recursive: true, force: true })),
+    );
+    return;
+  }
+  const walk = async (dir: string, relative: string): Promise<void> => {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    await Promise.all(entries.map(async (entry) => {
+      if (!relative && preserve.has(entry.name)) return;
+      const rel = relative ? `${relative}/${entry.name}` : entry.name;
+      const full = path.join(dir, entry.name);
+      if (preserveRelative(rel)) return;
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        await walk(full, rel);
+        const remaining = await fs.readdir(full).catch(() => ["kept"]);
+        if (remaining.length === 0) await fs.rmdir(full).catch(() => undefined);
+        return;
+      }
+      await fs.rm(full, { recursive: true, force: true });
+    }));
+  };
+  await walk(localDir, "");
 }
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
@@ -619,7 +879,7 @@ async function readLocalGitWorkspaceSnapshot(localDir: string): Promise<LocalGit
       return null;
     }
 
-    const [headCommitResult, branchResult, deletedResult] = await Promise.all([
+    const [headCommitResult, branchResult, deletedResult, stagedDeletedResult] = await Promise.all([
       runLocalGit(localDir, ["rev-parse", "HEAD"], {
         timeout: 10_000,
         maxBuffer: 16 * 1024,
@@ -628,20 +888,29 @@ async function readLocalGitWorkspaceSnapshot(localDir: string): Promise<LocalGit
         timeout: 10_000,
         maxBuffer: 16 * 1024,
       }),
+      // Unstaged deletions are still in the index. Staged deletions (`git rm`)
+      // are not, but the snapshot checkout would otherwise resurrect them.
       runLocalGit(localDir, ["ls-files", "--deleted", "-z"], {
+        timeout: 10_000,
+        maxBuffer: 256 * 1024,
+      }),
+      runLocalGit(localDir, ["diff", "--cached", "--name-only", "--diff-filter=D", "-z"], {
         timeout: 10_000,
         maxBuffer: 256 * 1024,
       }),
     ]);
 
     const branchName = branchResult.stdout.trim();
-    return {
-      headCommit: headCommitResult.stdout.trim(),
-      branchName: branchName && branchName !== "HEAD" ? branchName : null,
-      deletedPaths: deletedResult.stdout
+    const deletedPaths = [...new Set(
+      `${deletedResult.stdout}${stagedDeletedResult.stdout}`
         .split("\0")
         .map((entry) => entry.trim())
         .filter(Boolean),
+    )];
+    return {
+      headCommit: headCommitResult.stdout.trim(),
+      branchName: branchName && branchName !== "HEAD" ? branchName : null,
+      deletedPaths,
     };
   } catch {
     return null;
@@ -760,6 +1029,267 @@ async function streamSshToLocalFile(input: {
   }).finally(auth.cleanup);
 }
 
+function sparseSecretCheckoutScript(remoteDir: string): string[] {
+  const sparseFile = path.posix.join(remoteDir, ".git", "info", "sparse-checkout");
+  const lines = ["/*"];
+  for (const pattern of SSH_WORKSPACE_SECRET_EXCLUDES) {
+    lines.push(`!/${pattern}`, `!/**/${pattern}`);
+  }
+  return [
+    `mkdir -p ${shellQuote(path.posix.dirname(sparseFile))}`,
+    `git -C ${shellQuote(remoteDir)} config core.sparseCheckout true`,
+    `printf '%s\\n' ${lines.map((line) => shellQuote(line)).join(" ")} > ${shellQuote(sparseFile)}`,
+  ];
+}
+
+function remoteSecretWorktreeSweep(remoteDir: string): string {
+  const patterns = SSH_WORKSPACE_SECRET_EXCLUDES.join("|");
+  // POSIX sh: the import script runs under `sh -c`, and `read -d` is not portable.
+  // find -exec passes each path as an argument, so spaces stay intact.
+  const body = [
+    "root=$1",
+    "shift",
+    "for file do",
+    "  base=${file##*/}",
+    '  case "$base" in',
+    `    ${patterns})`,
+    '      rel=${file#"$root"/}',
+    '      git -C "$root" update-index --skip-worktree -- "$rel" 2>/dev/null || true',
+    '      rm -f -- "$file"',
+    '      parent=$(dirname "$file")',
+    '      while [ "$parent" != "$root" ] && rmdir "$parent" 2>/dev/null; do parent=$(dirname "$parent"); done',
+    "      ;;",
+    "  esac",
+    "done",
+  ].join("\n");
+  return [
+    `root=${shellQuote(remoteDir)}`,
+    `find "$root" \\( -path "$root/.git" -o -path "$root/.git/*" -o -path "$root/.paperclip-runtime" -o -path "$root/.paperclip-runtime/*" \\) -prune -o -type f -exec sh -c ${shellQuote(body)} sh "$root" {} +`,
+  ].join("\n");
+}
+
+// The remote repository is a parentless snapshot of the current tree, not a
+// copy of local history. Deny-listed paths are removed before the tree is
+// written, so their blobs are not reachable from the snapshot and a bundle of
+// that commit cannot carry them. Commit hashes differ from the local
+// repository, and the remote history starts at depth 1 plus whatever the
+// remote itself commits. Other branches, stashes, and older commits stay
+// local. On the way back, remote commits are replayed onto the recorded
+// source commit with the local deny-listed entries restored, so a remote
+// commit still lands and local history and those files stay untouched. A
+// remote that does not commit does not move the local branch.
+const FILTERED_SNAPSHOT_TRAILER = "Paperclip-Filtered-Snapshot";
+const FILTERED_SNAPSHOT_EPOCH = "1970-01-01T00:00:00Z";
+
+interface GitIndexEntry {
+  mode: string;
+  sha: string;
+  path: string;
+}
+
+function secretPathExcluded(relative: string): boolean {
+  return shouldExcludePath(relative, secretTransferExcludes());
+}
+
+function parseTreeListing(stdout: string): GitIndexEntry[] {
+  const entries: GitIndexEntry[] = [];
+  for (const record of stdout.split("\0")) {
+    if (!record) continue;
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, type, sha] = record.slice(0, tab).split(" ");
+    const filePath = record.slice(tab + 1);
+    if (!mode || !sha || !filePath || (type !== "blob" && type !== "commit")) continue;
+    entries.push({ mode, sha, path: filePath });
+  }
+  return entries;
+}
+
+async function listCommitEntries(localDir: string, commit: string): Promise<GitIndexEntry[]> {
+  const listed = await runLocalGit(localDir, ["ls-tree", "-r", "-z", commit], {
+    timeout: 60_000,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  return parseTreeListing(listed.stdout);
+}
+
+async function writeTreeFromEntries(localDir: string, entries: readonly GitIndexEntry[]): Promise<string> {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-index-"));
+  const index = path.join(temp, "index");
+  try {
+    await runLocalGit(localDir, ["read-tree", "--empty"], {
+      timeout: 30_000,
+      maxBuffer: 16 * 1024,
+      env: { GIT_INDEX_FILE: index },
+    });
+    if (entries.length > 0) {
+      const info = entries.map((entry) => `${entry.mode} ${entry.sha} 0\t${entry.path}\0`).join("");
+      await runLocalGit(localDir, ["update-index", "-z", "--index-info"], {
+        timeout: 60_000,
+        maxBuffer: 64 * 1024,
+        env: { GIT_INDEX_FILE: index },
+        stdin: info,
+      });
+    }
+    const tree = await runLocalGit(localDir, ["write-tree"], {
+      timeout: 60_000,
+      maxBuffer: 16 * 1024,
+      env: { GIT_INDEX_FILE: index },
+    });
+    const sha = tree.stdout.trim();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("Failed to write a filtered git tree.");
+    return sha;
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function commitTree(input: {
+  localDir: string;
+  tree: string;
+  parent?: string;
+  message: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-commit-"));
+  const messageFile = path.join(dir, "message");
+  try {
+    await fs.writeFile(messageFile, input.message.length > 0 ? input.message : "\n");
+    const args = ["commit-tree", input.tree];
+    if (input.parent) args.push("-p", input.parent);
+    args.push("-F", messageFile);
+    const created = await runLocalGit(input.localDir, args, {
+      timeout: 30_000,
+      maxBuffer: 16 * 1024,
+      env: input.env,
+    });
+    const sha = created.stdout.trim();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("Failed to write a filtered git commit.");
+    return sha;
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function createFilteredSnapshotCommit(localDir: string, sourceCommit: string): Promise<string> {
+  const entries = (await listCommitEntries(localDir, sourceCommit))
+    .filter((entry) => !secretPathExcluded(entry.path));
+  const tree = await writeTreeFromEntries(localDir, entries);
+  const original = await runLocalGit(localDir, ["log", "-1", "--format=%B", sourceCommit], {
+    timeout: 10_000,
+    maxBuffer: 1024 * 1024,
+  });
+  const body = original.stdout.endsWith("\n") || original.stdout.length === 0
+    ? original.stdout
+    : `${original.stdout}\n`;
+  return await commitTree({
+    localDir,
+    tree,
+    message: `${body}\n${FILTERED_SNAPSHOT_TRAILER}: ${sourceCommit}\n`,
+    env: {
+      GIT_AUTHOR_NAME: "Paperclip",
+      GIT_AUTHOR_EMAIL: "noreply@paperclip.ing",
+      GIT_AUTHOR_DATE: FILTERED_SNAPSHOT_EPOCH,
+      GIT_COMMITTER_NAME: "Paperclip",
+      GIT_COMMITTER_EMAIL: "noreply@paperclip.ing",
+      GIT_COMMITTER_DATE: FILTERED_SNAPSHOT_EPOCH,
+    },
+  });
+}
+
+function filteredSnapshotSource(message: string): string | null {
+  const matches = [...message.matchAll(/^Paperclip-Filtered-Snapshot: ([0-9a-f]{40})$/gm)];
+  return matches.at(-1)?.[1] ?? null;
+}
+
+// Replay remote commits onto the local source commit recorded in the snapshot.
+// Returns the source commit when the remote made no commits, so the caller
+// leaves the local branch where it is. Histories that are not one of these
+// snapshots pass through unchanged.
+async function translateFilteredRemoteHead(localDir: string, importedHead: string): Promise<string> {
+  const roots = (await runLocalGit(localDir, ["rev-list", "--max-parents=0", importedHead], {
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  })).stdout.trim().split("\n").filter(Boolean);
+  if (roots.length !== 1 || !roots[0]) return importedHead;
+  const root = roots[0];
+  const message = (await runLocalGit(localDir, ["log", "-1", "--format=%B", root], {
+    timeout: 10_000,
+    maxBuffer: 1024 * 1024,
+  })).stdout;
+  const source = filteredSnapshotSource(message);
+  if (!source) return importedHead;
+  const sourceType = await runLocalGit(localDir, ["cat-file", "-t", source], {
+    timeout: 10_000,
+    maxBuffer: 16 * 1024,
+  }).catch(() => null);
+  if (sourceType?.stdout.trim() !== "commit") return importedHead;
+
+  const descendants = (await runLocalGit(localDir, ["rev-list", "--reverse", `${root}..${importedHead}`], {
+    timeout: 60_000,
+    maxBuffer: 4 * 1024 * 1024,
+  })).stdout.trim().split("\n").filter(Boolean);
+  if (descendants.length === 0) return source;
+
+  const secretEntries = (await listCommitEntries(localDir, source))
+    .filter((entry) => secretPathExcluded(entry.path));
+  let parent = source;
+  for (const commit of descendants) {
+    const remoteEntries = (await listCommitEntries(localDir, commit))
+      .filter((entry) => !secretPathExcluded(entry.path));
+    const seen = new Set(remoteEntries.map((entry) => entry.path));
+    const merged = [...remoteEntries];
+    for (const secret of secretEntries) {
+      if (!seen.has(secret.path)) merged.push(secret);
+    }
+    const tree = await writeTreeFromEntries(localDir, merged);
+    const metadata = (await runLocalGit(localDir, [
+      "log", "-1", "--format=%B%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI", commit,
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024 })).stdout.split("\0");
+    const [commitMessage, authorName, authorEmail, authorDate, committerName, committerEmail, committerDate] = metadata;
+    parent = await commitTree({
+      localDir,
+      tree,
+      parent,
+      message: commitMessage ?? "",
+      env: {
+        GIT_AUTHOR_NAME: authorName || "Paperclip",
+        GIT_AUTHOR_EMAIL: authorEmail || "noreply@paperclip.ing",
+        GIT_AUTHOR_DATE: authorDate || FILTERED_SNAPSHOT_EPOCH,
+        GIT_COMMITTER_NAME: committerName || "Paperclip",
+        GIT_COMMITTER_EMAIL: committerEmail || "noreply@paperclip.ing",
+        GIT_COMMITTER_DATE: committerDate || FILTERED_SNAPSHOT_EPOCH,
+      },
+    });
+  }
+  return parent;
+}
+
+async function resolveGitPath(localDir: string, name: string): Promise<string> {
+  const raw = (await runLocalGit(localDir, ["rev-parse", "--git-path", name], {
+    timeout: 10_000,
+    maxBuffer: 16 * 1024,
+  })).stdout.trim();
+  return path.resolve(localDir, raw);
+}
+
+// The filtered snapshot commit is disposable packaging for the bundle. Write
+// it in a temporary repository that borrows the local object store read-only,
+// so the caller's repo does not keep an unreferenced commit or tree.
+async function createIsolatedSnapshotRepo(localDir: string): Promise<string> {
+  const repo = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-snapshot-"));
+  try {
+    await runLocalGit(repo, ["init", "--quiet"], { timeout: 10_000, maxBuffer: 16 * 1024 });
+    const infoDir = path.join(await resolveGitPath(repo, "objects"), "info");
+    await fs.mkdir(infoDir, { recursive: true });
+    await fs.writeFile(path.join(infoDir, "alternates"), `${await resolveGitPath(localDir, "objects")}\n`, { mode: 0o600 });
+    return repo;
+  } catch (error) {
+    await fs.rm(repo, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 async function importGitWorkspaceToSsh(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
@@ -769,20 +1299,26 @@ async function importGitWorkspaceToSsh(input: {
 }): Promise<void> {
   const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-bundle-"));
   const bundlePath = path.join(bundleDir, "workspace.bundle");
-  // Per-import unique ref so concurrent imports against the same local repo
-  // can't race on `update-ref` between this run's update and bundle create.
+  // Per-import unique ref. The ref lives only in the temporary snapshot
+  // repository, so concurrent imports do not share a local ref or object.
   const tempRef = `refs/paperclip/ssh-sync/import/${randomUUID()}`;
+  let snapshotRepo: string | null = null;
 
   try {
-    await runLocalGit(input.localDir, ["update-ref", tempRef, input.snapshot.headCommit], {
+    snapshotRepo = await createIsolatedSnapshotRepo(input.localDir);
+    // Bundle the filtered snapshot only. Pointing the temporary ref at the
+    // local HEAD would pack every ancestor blob, including deny-listed files.
+    const snapshotCommit = await createFilteredSnapshotCommit(snapshotRepo, input.snapshot.headCommit);
+    await runLocalGit(snapshotRepo, ["update-ref", tempRef, snapshotCommit], {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     });
-    await runLocalGit(input.localDir, ["bundle", "create", bundlePath, tempRef], {
+    await runLocalGit(snapshotRepo, ["bundle", "create", bundlePath, tempRef], {
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
     });
     const originUrl = await readSanitizedOriginRemoteUrl(input.localDir);
+    const remoteGit = path.posix.join(input.remoteDir, ".git");
 
     const remoteSetupScript = [
       "set -e",
@@ -790,7 +1326,15 @@ async function importGitWorkspaceToSsh(input: {
       `tmp_bundle=$(mktemp ${shellQuote(path.posix.join(input.remoteDir, ".paperclip-runtime", "import-XXXXXX.bundle"))})`,
       'trap \'rm -f "$tmp_bundle"\' EXIT',
       'cat > "$tmp_bundle"',
-      `if [ ! -d ${shellQuote(path.posix.join(input.remoteDir, ".git"))} ]; then git init ${shellQuote(input.remoteDir)} >/dev/null; fi`,
+      // Replace any previous object store. A reused directory must not keep
+      // blobs, refs, or reflogs from an earlier copy.
+      `if [ -L ${shellQuote(remoteGit)} ]; then echo "refused symlink" >&2; exit 3; fi`,
+      `rm -rf -- ${shellQuote(remoteGit)}`,
+      `git init ${shellQuote(input.remoteDir)} >/dev/null`,
+      // Sparse-checkout and the sweep are a second line of defence so a
+      // deny-listed basename is not written into the work tree. The snapshot
+      // commit itself does not reference those blobs.
+      ...sparseSecretCheckoutScript(input.remoteDir),
       // Carry the workspace's (credential-scrubbed) origin into the transported
       // repo so branches there keep a publishable remote instead of reading as
       // remote-less snapshots. set-url covers a reused workspace whose origin
@@ -802,12 +1346,16 @@ async function importGitWorkspaceToSsh(input: {
         : []),
       `git -C ${shellQuote(input.remoteDir)} fetch --force "$tmp_bundle" '${tempRef}:${tempRef}' >/dev/null`,
       input.snapshot.branchName
-        ? `git -C ${shellQuote(input.remoteDir)} checkout --force -B ${shellQuote(input.snapshot.branchName)} ${shellQuote(input.snapshot.headCommit)} >/dev/null`
-        : `git -C ${shellQuote(input.remoteDir)} -c advice.detachedHead=false checkout --force --detach ${shellQuote(input.snapshot.headCommit)} >/dev/null`,
-      `git -C ${shellQuote(input.remoteDir)} reset --hard ${shellQuote(input.snapshot.headCommit)} >/dev/null`,
+        ? `git -C ${shellQuote(input.remoteDir)} checkout --force -B ${shellQuote(input.snapshot.branchName)} ${shellQuote(tempRef)} >/dev/null`
+        : `git -C ${shellQuote(input.remoteDir)} -c advice.detachedHead=false checkout --force --detach ${shellQuote(tempRef)} >/dev/null`,
+      `git -C ${shellQuote(input.remoteDir)} reset --hard ${shellQuote(tempRef)} >/dev/null`,
       `git -C ${shellQuote(input.remoteDir)} clean -fdx -e .paperclip-runtime >/dev/null`,
-      // Drop the per-import ref on the remote side too so it can't accumulate.
+      remoteSecretWorktreeSweep(input.remoteDir),
+      // Drop the import ref, its reflog, and any object the branch does not
+      // still reach, including the bundle's temporary pack residue.
       `git -C ${shellQuote(input.remoteDir)} update-ref -d ${shellQuote(tempRef)} >/dev/null 2>&1 || true`,
+      `git -C ${shellQuote(input.remoteDir)} reflog expire --expire=now --all >/dev/null`,
+      `git -C ${shellQuote(input.remoteDir)} gc --prune=now >/dev/null`,
     ].join("\n");
 
     // The git bundle is a real local file of known size, so report an exact
@@ -836,10 +1384,7 @@ async function importGitWorkspaceToSsh(input: {
       throw error;
     }
   } finally {
-    await runLocalGit(input.localDir, ["update-ref", "-d", tempRef], {
-      timeout: 10_000,
-      maxBuffer: 16 * 1024,
-    }).catch(() => undefined);
+    if (snapshotRepo) await fs.rm(snapshotRepo, { recursive: true, force: true }).catch(() => undefined);
     await fs.rm(bundleDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
@@ -897,17 +1442,21 @@ async function exportGitWorkspaceFromSsh(input: {
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
     });
+    const importedHead = (await runLocalGit(input.localDir, ["rev-parse", importedRef], {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024,
+    })).stdout.trim();
+    // A filtered snapshot has no local parent. Replay remote commits onto the
+    // recorded source commit before reset or merge so the local branch keeps
+    // its history and its deny-listed blobs.
+    const effectiveHead = await translateFilteredRemoteHead(input.localDir, importedHead);
     if (input.resetLocalWorkspace !== false) {
-      await runLocalGit(input.localDir, ["reset", "--hard", importedRef], {
+      await runLocalGit(input.localDir, ["reset", "--hard", effectiveHead], {
         timeout: 60_000,
         maxBuffer: 1024 * 1024,
       });
     }
-    const importedHead = await runLocalGit(input.localDir, ["rev-parse", importedRef], {
-      timeout: 10_000,
-      maxBuffer: 16 * 1024,
-    });
-    return importedHead.stdout.trim();
+    return effectiveHead;
   } finally {
     if (input.resetLocalWorkspace !== false) {
       await runLocalGit(input.localDir, ["update-ref", "-d", importedRef], {
@@ -1123,7 +1672,10 @@ async function transportGitWorkspaceToSsh(input: {
   exclude?: string[];
   onProgress?: RuntimeProgressSink;
   progressLabel: string;
+  signal?: AbortSignal;
+  transferLimits?: WorkspaceTransferLimits;
 }): Promise<void> {
+  throwIfAborted(input.signal);
   await importGitWorkspaceToSsh({
     spec: input.spec,
     localDir: input.localDir,
@@ -1138,6 +1690,8 @@ async function transportGitWorkspaceToSsh(input: {
     exclude: [".git", ".paperclip-runtime", ...(input.exclude ?? [])],
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
+    signal: input.signal,
+    transferLimits: input.transferLimits,
   });
   await removeDeletedPathsOnSsh({
     spec: input.spec,
@@ -1284,8 +1838,10 @@ export async function runSshCommand(
     stdin?: string;
     timeoutMs?: number;
     maxBuffer?: number;
+    signal?: AbortSignal;
   } = {},
 ): Promise<SshCommandResult> {
+  if (options.signal?.aborted) throw new WorkspaceOperationAbortedError();
   let cleanup: () => Promise<void> = () => Promise.resolve();
   try {
     const auth = await createSshAuthArgs(config);
@@ -1333,10 +1889,12 @@ export async function runSshCommand(
           stdin: options.stdin,
           timeout: options.timeoutMs ?? 15_000,
           maxBuffer: options.maxBuffer ?? 1024 * 128,
+          signal: options.signal,
         })
       : await execFileText("ssh", sshArgs, {
           timeout: options.timeoutMs ?? 15_000,
           maxBuffer: options.maxBuffer ?? 1024 * 128,
+          signal: options.signal,
         });
   } finally {
     await cleanup();
@@ -1400,6 +1958,357 @@ export async function buildSshSpawnTarget(input: {
   };
 }
 
+export interface WorkspaceTransferLimits {
+  maxBytes?: number;
+  maxEntries?: number;
+}
+
+function enforcedTransferLimits(input?: WorkspaceTransferLimits): { maxBytes: number; maxEntries: number } {
+  return {
+    maxBytes: Math.min(SSH_WORKSPACE_SYNC_MAX_BYTES, Math.max(1, input?.maxBytes ?? SSH_WORKSPACE_SYNC_MAX_BYTES)),
+    maxEntries: Math.min(SSH_WORKSPACE_SYNC_MAX_ENTRIES, Math.max(1, input?.maxEntries ?? SSH_WORKSPACE_SYNC_MAX_ENTRIES)),
+  };
+}
+
+function callerTransferExcludes(exclude: readonly string[] | undefined): string[] {
+  return (exclude ?? []).filter((entry) => entry.length > 0 && !entry.startsWith("!"));
+}
+
+/**
+ * Excludes shared by upload, the baseline snapshot, and restore. Secret and
+ * `.git` patterns are always present. A `!` caller pattern is dropped so it
+ * cannot negate them.
+ */
+export async function resolveWorkspaceTransferExcludes(input: {
+  localDir: string;
+  workspaceFileMode?: "all";
+  workspaceExclude?: string[];
+  extra?: string[];
+  signal?: AbortSignal;
+}): Promise<string[]> {
+  if (input.signal?.aborted) throw new WorkspaceOperationAbortedError();
+  const includeHeavy = input.workspaceFileMode !== "all";
+  let ignored: string[] = [];
+  if (includeHeavy) {
+    const resolution = await resolveReferencedSourceIgnore(input.localDir);
+    if (resolution.kind === "failed") {
+      throw new Error(`Workspace ignore scan failed: ${resolution.reason}`);
+    }
+    if (resolution.kind === "git") ignored = resolution.ignoredPaths;
+    // Not a work tree, so git does not apply .gitignore for us. A throwaway
+    // repository evaluates the source's own ignore files, including negation
+    // and nested files, without writing into the source. `workspaceFileMode:
+    // "all"` skips this branch and still copies those files.
+    else ignored = await readPlainDirectoryGitignorePaths(input.localDir);
+  }
+  return [...new Set([
+    ".paperclip-runtime",
+    ".git",
+    ...secretTransferExcludes(),
+    ...(includeHeavy ? SSH_WORKSPACE_HEAVY_DIR_NAMES : []),
+    ...ignored,
+    ...callerTransferExcludes(input.workspaceExclude),
+    ...callerTransferExcludes(input.extra),
+  ])];
+}
+
+async function readPlainDirectoryGitignorePaths(localDir: string): Promise<string[]> {
+  const gitDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-ignore-"));
+  try {
+    await runLocalGit(gitDir, ["init", "-q"], { timeout: 10_000, maxBuffer: 16 * 1024 });
+    await fs.writeFile(path.join(gitDir, ".git", "info", "exclude"), "");
+    const result = await runLocalGit(gitDir, [
+      "-c", "core.excludesFile=",
+      "--work-tree", localDir,
+      "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z",
+    ], { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
+    const ignored: string[] = [];
+    let totalBytes = 0;
+    for (const record of result.stdout.split("\0")) {
+      const entry = record.replace(/\/+$/, "");
+      if (entry.length === 0) continue;
+      if (entry.startsWith("/") || entry.split("/").includes("..")) {
+        throw new Error("Workspace ignore scan returned an unsafe path.");
+      }
+      ignored.push(entry);
+      totalBytes += Buffer.byteLength(entry, "utf8");
+      if (ignored.length > 10_000 || totalBytes > 2 * 1024 * 1024) {
+        throw new Error("Workspace ignore scan exceeded its path limit.");
+      }
+    }
+    return ignored;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Workspace ignore scan")) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Workspace ignore scan failed: ${message}`);
+  } finally {
+    await fs.rm(gitDir, { recursive: true, force: true }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Workspace ignore scan cleanup failed: ${message}`);
+    });
+  }
+}
+
+function slashlessNameExcluded(name: string, exclude: readonly string[]): boolean {
+  return exclude.some((pattern) => (
+    pattern === name &&
+    !pattern.includes("/") &&
+    !pattern.includes("*") &&
+    !pattern.includes("?")
+  ));
+}
+
+/** Walks the filtered tree and fails closed before any archive is spawned. */
+export async function assertWorkspaceTransferWithinLimits(input: {
+  localDir: string;
+  exclude?: string[];
+  limits?: WorkspaceTransferLimits;
+  signal?: AbortSignal;
+}): Promise<{ bytes: number; entries: number; omittedDirectories: string[] }> {
+  if (input.signal?.aborted) throw new WorkspaceOperationAbortedError();
+  const limits = enforcedTransferLimits(input.limits);
+  const exclude = input.exclude ?? [];
+  let bytes = 0;
+  let entries = 0;
+  const omittedDirectories: string[] = [];
+  const fail = () => {
+    throw new WorkspaceSyncLimitError(
+      entries > limits.maxEntries
+        ? `Workspace copy has more than ${limits.maxEntries} entries.`
+        : `Workspace copy is larger than ${limits.maxBytes} bytes.`,
+      { bytes, entries },
+      limits,
+    );
+  };
+  // A directory that still has something to copy, including a genuinely empty
+  // directory. False when every descendant was excluded, so the caller can
+  // keep that empty shell out of the archive.
+  const walk = async (dir: string, relative: string): Promise<boolean> => {
+    if (input.signal?.aborted) throw new WorkspaceOperationAbortedError();
+    const dirents = await fs.readdir(dir, { withFileTypes: true });
+    if (dirents.length === 0) return true;
+    let included = false;
+    for (const entry of dirents) {
+      const rel = relative ? `${relative}/${entry.name}` : entry.name;
+      // Slashless names such as `id_ed25519` match a basename in tar. The
+      // shared helper only treats those as exact paths, so a nested secret
+      // would otherwise keep an empty parent directory in the archive.
+      if (shouldExcludePath(rel, exclude) || slashlessNameExcluded(entry.name, exclude)) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const childIncluded = await walk(full, rel);
+        if (!childIncluded) {
+          omittedDirectories.push(rel);
+          continue;
+        }
+      }
+      entries += 1;
+      if (entries > limits.maxEntries) fail();
+      included = true;
+      if (!entry.isDirectory() && entry.isFile()) {
+        bytes += (await fs.lstat(full)).size;
+        if (bytes > limits.maxBytes) fail();
+      }
+    }
+    return included;
+  };
+  await walk(input.localDir, "");
+  return { bytes, entries, omittedDirectories };
+}
+
+function absolutePosixPath(value: string): string | null {
+  if (!value.startsWith("/") || value.includes("\0") || value.includes("\\")) return null;
+  const trimmed = value.length > 1 ? value.replace(/\/+$/, "") : value;
+  if (path.posix.normalize(trimmed) !== trimmed) return null;
+  if (trimmed.split("/").includes("..")) return null;
+  return trimmed;
+}
+
+/**
+ * Confirms a remote directory exists, resolves to a canonical path, and stays
+ * inside the environment root. Does not copy anything. A missing or escaped
+ * path throws before any archive is spawned.
+ */
+export async function validateExistingRemoteWorkspace(input: {
+  spec: SshConnectionConfig;
+  remoteCwd: string;
+  allowedRoot: string;
+  signal?: AbortSignal;
+}): Promise<string> {
+  if (input.signal?.aborted) throw new WorkspaceOperationAbortedError();
+  const candidate = absolutePosixPath(input.remoteCwd.trim());
+  const root = absolutePosixPath(input.allowedRoot.trim());
+  if (!candidate || !root) {
+    throw new RemoteWorkspaceAttachError("Remote workspace path must be an absolute path inside the environment root.");
+  }
+  const script = [
+    "set -e",
+    `root=$(cd -- ${shellQuote(root)} && pwd -P)`,
+    `target=$(cd -- ${shellQuote(candidate)} && pwd -P)`,
+    'case "$target" in',
+    '  "$root"|"$root"/*) printf "%s\\n" "$target" ;;',
+    "  *) exit 4 ;;",
+    "esac",
+  ].join("\n");
+  let result: SshCommandResult;
+  try {
+    result = await runSshCommand(input.spec, script, { signal: input.signal, timeoutMs: 15_000 });
+  } catch (error) {
+    if (error instanceof WorkspaceOperationAbortedError || input.signal?.aborted) {
+      throw error instanceof WorkspaceOperationAbortedError ? error : new WorkspaceOperationAbortedError();
+    }
+    throw new RemoteWorkspaceAttachError(
+      `Remote workspace ${candidate} is not an existing directory inside ${root}.`,
+      { cause: error },
+    );
+  }
+  const canonical = result.stdout.trim();
+  // The remote script already rejected a target outside the canonical root.
+  // Compare against that result, not the caller's possibly non-canonical input.
+  if (!absolutePosixPath(canonical)) {
+    throw new RemoteWorkspaceAttachError(`Remote workspace ${candidate} did not resolve to an absolute path inside ${root}.`);
+  }
+  return canonical;
+}
+
+function syncMarkerPath(remoteDir: string): string {
+  return `${path.posix.dirname(remoteDir)}/.paperclip-sync-${randomUUID()}.pgid`;
+}
+
+function remoteProcessGroupScript(markerPath: string, quotedCommand: string): string {
+  const marker = shellQuote(markerPath);
+  const parent = shellQuote(path.posix.dirname(markerPath));
+  const inner = shellQuote('printf \'%s\' "$$" > "$1"; shift; exec "$@"');
+  const wrapped = `sh -c ${inner} sh ${marker} ${quotedCommand}`;
+  return [
+    `mkdir -p ${parent}`,
+    `if command -v setsid >/dev/null 2>&1; then setsid -w ${wrapped}; else ${wrapped}; fi`,
+    `rm -f ${marker}`,
+  ].join(" && ");
+}
+
+function remoteKillScript(markerPath: string, identityPath: string): string {
+  // The marker is removed even when the process is already gone. Leaving on
+  // the first failed /proc check is what stranded one marker per cancel.
+  return [
+    "set +e",
+    `marker=${shellQuote(markerPath)}`,
+    `identity=${shellQuote(identityPath)}`,
+    'if [ ! -f "$marker" ]; then exit 0; fi',
+    'pid=$(tr -cd "0-9" < "$marker")',
+    'alive=0',
+    'if [ -n "$pid" ] && [ "$pid" -gt 1 ] && grep -F -q -a -e "$identity" "/proc/$pid/cmdline"; then alive=1; fi',
+    'if [ "$alive" -eq 1 ]; then',
+    '  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM -- "$pid" 2>/dev/null || true',
+    "  i=0",
+    '  while [ "$i" -lt 20 ] && kill -0 -- "$pid" 2>/dev/null; do i=$((i+1)); sleep 0.1; done',
+    '  if kill -0 -- "$pid" 2>/dev/null; then kill -KILL -- "-$pid" 2>/dev/null || kill -KILL -- "$pid" 2>/dev/null || true; fi',
+    "fi",
+    'rm -f -- "$marker"',
+    'if [ -f "$marker" ]; then echo "Failed to remove sync marker" >&2; exit 1; fi',
+    "exit 0",
+  ].join("\n");
+}
+
+function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (!pid || pid <= 1) return;
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+    try {
+      process.kill(pid, signal);
+    } catch (inner) {
+      if ((inner as NodeJS.ErrnoException).code !== "ESRCH") throw inner;
+    }
+  }
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.removeListener("close", onClose);
+      resolve();
+    }, timeoutMs);
+    const onClose = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    child.once("close", onClose);
+  });
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new WorkspaceOperationAbortedError();
+}
+
+async function cancelOwnedSync(input: {
+  children: ChildProcess[];
+  spec: SshConnectionConfig;
+  markerPath: string;
+  identityPath: string;
+}): Promise<void> {
+  for (const child of input.children) {
+    child.stdout?.destroy();
+    child.stdin?.destroy();
+    killProcessGroup(child.pid, "SIGTERM");
+  }
+  await Promise.all(input.children.map((child) => waitForChildExit(child, SYNC_CANCEL_GRACE_MS)));
+  for (const child of input.children) {
+    if (child.exitCode === null && child.signalCode === null) killProcessGroup(child.pid, "SIGKILL");
+  }
+  await Promise.all(input.children.map((child) => waitForChildExit(child, SYNC_CANCEL_GRACE_MS)));
+  await runSshCommand(input.spec, remoteKillScript(input.markerPath, input.identityPath), {
+    timeoutMs: 10_000,
+  });
+}
+
+function bindSyncCancel(input: {
+  signal?: AbortSignal;
+  children: ChildProcess[];
+  spec: SshConnectionConfig;
+  markerPath: string;
+  identityPath: string;
+}): {
+  isAborting: () => boolean;
+  cancel: () => Promise<void>;
+  finishAbort: (rejectOnce: (error: Error) => void) => void;
+  detach: () => void;
+} {
+  let aborting = false;
+  let pending: Promise<void> | null = null;
+  const cancel = () => {
+    if (!pending) {
+      aborting = true;
+      pending = cancelOwnedSync({
+        children: input.children,
+        spec: input.spec,
+        markerPath: input.markerPath,
+        identityPath: input.identityPath,
+      });
+    }
+    return pending;
+  };
+  const onAbort = () => { void cancel(); };
+  input.signal?.addEventListener("abort", onAbort);
+  return {
+    isAborting: () => aborting,
+    cancel,
+    finishAbort: (rejectOnce) => {
+      void cancel().then(
+        () => rejectOnce(new WorkspaceOperationAbortedError()),
+        (error: unknown) => rejectOnce(error instanceof Error ? error : new Error(String(error))),
+      );
+    },
+    detach: () => { input.signal?.removeEventListener("abort", onAbort); },
+  };
+}
+
+function isPipeNoise(error: NodeJS.ErrnoException, aborting: boolean): boolean {
+  return aborting && (error.code === "EPIPE" || error.code === "ERR_STREAM_PREMATURE_CLOSE" || error.code === "ERR_STREAM_DESTROYED");
+}
+
 export async function syncDirectoryToSsh(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
@@ -1408,20 +2317,30 @@ export async function syncDirectoryToSsh(input: {
   followSymlinks?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
+  signal?: AbortSignal;
+  transferLimits?: WorkspaceTransferLimits;
 }): Promise<void> {
+  throwIfAborted(input.signal);
+  const withinLimits = await assertWorkspaceTransferWithinLimits({
+    localDir: input.localDir,
+    exclude: input.exclude,
+    limits: input.transferLimits,
+    signal: input.signal,
+  });
+  throwIfAborted(input.signal);
+  const markerPath = syncMarkerPath(input.remoteDir);
   const auth = await createSshAuthArgs(input.spec);
+  const remoteScript = [
+    `mkdir -p ${shellQuote(input.remoteDir)}`,
+    remoteProcessGroupScript(markerPath, ["tar", "-xf", "-", "-C", input.remoteDir].map(shellQuote).join(" ")),
+  ].join(" && ");
   const sshArgs = [
     ...auth.args,
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(`mkdir -p ${shellQuote(input.remoteDir)} && tar -xf - -C ${shellQuote(input.remoteDir)}`)}`,
+    `sh -c ${shellQuote(remoteScript)}`,
   ];
-
-  // tar's archive size isn't known until tar finishes, so estimate it from the
-  // local file sizes and clamp the reported percent to 99% until the pipe closes.
-  // The estimate walk runs concurrently with the transfer so it never delays the
-  // pipe from opening on large workspaces.
   const progress = input.onProgress
     ? createTransferProgress({
       onProgress: input.onProgress,
@@ -1436,90 +2355,94 @@ export async function syncDirectoryToSsh(input: {
       estimated: true,
     })
     : null;
-
+  const children: ChildProcess[] = [];
+  const session = bindSyncCancel({
+    signal: input.signal,
+    children,
+    spec: input.spec,
+    markerPath,
+    identityPath: input.remoteDir,
+  });
   try {
+    throwIfAborted(input.signal);
     await new Promise<void>((resolve, reject) => {
-    const tarArgs = [
-      ...(input.followSymlinks ? ["-h"] : []),
-      "-C",
-      input.localDir,
-      ...tarExcludeArgs(input.exclude),
-      "-cf",
-      "-",
-      ".",
-    ];
-    const tar = spawn("tar", tarArgs, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: tarSpawnEnv(),
-    });
-    const ssh = spawn("ssh", sshArgs, {
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-
-    let tarStderr = "";
-    let sshStderr = "";
-    let settled = false;
-    let tarExited = false;
-    let sshExited = false;
-    let tarExitCode: number | null = null;
-    let sshExitCode: number | null = null;
-
-    const maybeFinish = () => {
-      if (settled || !tarExited || !sshExited) {
-        return;
+      const tarArgs = [
+        ...(input.followSymlinks ? ["-h"] : []),
+        "-C",
+        input.localDir,
+        ...tarExcludeArgs(input.exclude),
+        ...withinLimits.omittedDirectories.flatMap((relative) => ["--exclude", `./${relative}`]),
+        "-cf",
+        "-",
+        ".",
+      ];
+      const tar = spawn("tar", tarArgs, { detached: true, stdio: ["ignore", "pipe", "pipe"], env: tarSpawnEnv() });
+      const ssh = spawn("ssh", sshArgs, { detached: true, stdio: ["pipe", "ignore", "pipe"] });
+      children.push(tar, ssh);
+      let tarStderr = "";
+      let sshStderr = "";
+      let settled = false;
+      let tarExited = false;
+      let sshExited = false;
+      let tarExitCode: number | null = null;
+      let sshExitCode: number | null = null;
+      const rejectOnce = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      const maybeFinish = () => {
+        if (settled || !tarExited || !sshExited) return;
+        if (session.isAborting()) {
+          session.finishAbort(rejectOnce);
+          return;
+        }
+        settled = true;
+        if ((tarExitCode ?? 0) !== 0) {
+          reject(new Error(tarStderr.trim() || `tar exited with code ${tarExitCode ?? -1}`));
+          return;
+        }
+        if ((sshExitCode ?? 0) !== 0) {
+          reject(new Error(sshStderr.trim() || `ssh exited with code ${sshExitCode ?? -1}`));
+          return;
+        }
+        resolve();
+      };
+      const fail = (error: Error) => {
+        if (settled || session.isAborting() || isPipeNoise(error as NodeJS.ErrnoException, session.isAborting())) return;
+        settled = true;
+        void session.cancel().finally(() => rejectOnce(error));
+      };
+      const onStreamError = (error: NodeJS.ErrnoException) => {
+        if (isPipeNoise(error, session.isAborting()) || session.isAborting()) return;
+        fail(error);
+      };
+      if (progress) {
+        progress.counter.on("error", (error) => onStreamError(error as NodeJS.ErrnoException));
+        tar.stdout?.on("error", onStreamError);
+        tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
+      } else {
+        tar.stdout?.on("error", onStreamError);
+        tar.stdout?.pipe(ssh.stdin ?? null);
       }
-      settled = true;
-      if ((tarExitCode ?? 0) !== 0) {
-        reject(new Error(tarStderr.trim() || `tar exited with code ${tarExitCode ?? -1}`));
-        return;
-      }
-      if ((sshExitCode ?? 0) !== 0) {
-        reject(new Error(sshStderr.trim() || `ssh exited with code ${sshExitCode ?? -1}`));
-        return;
-      }
-      resolve();
-    };
-
-    const fail = (error: Error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      tar.kill("SIGTERM");
-      ssh.kill("SIGTERM");
-      reject(error);
-    };
-
-    if (progress) {
-      progress.counter.on("error", fail);
-      tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
-    } else {
-      tar.stdout?.pipe(ssh.stdin ?? null);
-    }
-    tar.stderr?.on("data", (chunk) => {
-      tarStderr += String(chunk);
+      ssh.stdin?.on("error", onStreamError);
+      tar.stderr?.on("data", (chunk) => { tarStderr += String(chunk); });
+      ssh.stderr?.on("data", (chunk) => { sshStderr += String(chunk); });
+      tar.on("error", fail);
+      ssh.on("error", fail);
+      tar.on("close", (code) => { tarExited = true; tarExitCode = code; maybeFinish(); });
+      ssh.on("close", (code) => { sshExited = true; sshExitCode = code; maybeFinish(); });
+      if (input.signal?.aborted) session.finishAbort(rejectOnce);
     });
-    ssh.stderr?.on("data", (chunk) => {
-      sshStderr += String(chunk);
-    });
-
-    tar.on("error", fail);
-    ssh.on("error", fail);
-    tar.on("close", (code) => {
-      tarExited = true;
-      tarExitCode = code;
-      maybeFinish();
-    });
-    ssh.on("close", (code) => {
-      sshExited = true;
-      sshExitCode = code;
-      maybeFinish();
-    });
-    }).finally(auth.cleanup);
+    if (session.isAborting()) throw new WorkspaceOperationAbortedError();
     await progress?.finish();
   } catch (error) {
+    if (!session.isAborting() && input.signal?.aborted) await session.cancel();
     await progress?.fail();
     throw error;
+  } finally {
+    session.detach();
+    await auth.cleanup();
   }
 }
 
@@ -1529,27 +2452,27 @@ export async function syncDirectoryFromSsh(input: {
   localDir: string;
   exclude?: string[];
   preserveLocalEntries?: string[];
+  /** Keep deny-listed files already on disk. The incoming archive omits them. */
+  preserveSecretFiles?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
+  signal?: AbortSignal;
 }): Promise<void> {
+  throwIfAborted(input.signal);
+  const markerPath = syncMarkerPath(input.remoteDir);
   const auth = await createSshAuthArgs(input.spec);
   const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
-  const remoteTarScript = [
-    `cd ${shellQuote(input.remoteDir)}`,
-    `tar ${[...tarExcludeArgs(input.exclude).map(shellQuote), "-cf", "-", "."].join(" ")}`,
-  ].join(" && ");
+  const remoteScript = remoteProcessGroupScript(
+    markerPath,
+    ["tar", "-C", input.remoteDir, ...tarExcludeArgs(input.exclude), "-cf", "-", "."].map(shellQuote).join(" "),
+  );
   const sshArgs = [
     ...auth.args,
     "-p",
     String(input.spec.port),
     `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(remoteTarScript)}`,
+    `sh -c ${shellQuote(remoteScript)}`,
   ];
-
-  // The remote tar size isn't known locally, so probe the remote directory for
-  // an estimate (clamped to 99%). The probe runs concurrently with the transfer
-  // so its round-trip never delays the restore; when it is unavailable we report
-  // bytes received in MB mode with a terminal completion line.
   const progress = input.onProgress
     ? createTransferProgress({
       onProgress: input.onProgress,
@@ -1560,17 +2483,20 @@ export async function syncDirectoryFromSsh(input: {
       estimated: true,
     })
     : null;
-
+  const children: ChildProcess[] = [];
+  const session = bindSyncCancel({
+    signal: input.signal,
+    children,
+    spec: input.spec,
+    markerPath,
+    identityPath: input.remoteDir,
+  });
   try {
+    throwIfAborted(input.signal);
     await new Promise<void>((resolve, reject) => {
-      const ssh = spawn("ssh", sshArgs, {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      const tar = spawn("tar", ["-xf", "-", "-C", stagingDir], {
-        stdio: ["pipe", "ignore", "pipe"],
-        env: tarSpawnEnv(),
-      });
-
+      const ssh = spawn("ssh", sshArgs, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      const tar = spawn("tar", ["-xf", "-", "-C", stagingDir], { detached: true, stdio: ["pipe", "ignore", "pipe"], env: tarSpawnEnv() });
+      children.push(ssh, tar);
       let sshStderr = "";
       let tarStderr = "";
       let settled = false;
@@ -1578,9 +2504,17 @@ export async function syncDirectoryFromSsh(input: {
       let tarExited = false;
       let sshExitCode: number | null = null;
       let tarExitCode: number | null = null;
-
+      const rejectOnce = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
       const maybeFinish = () => {
         if (settled || !sshExited || !tarExited) return;
+        if (session.isAborting()) {
+          session.finishAbort(rejectOnce);
+          return;
+        }
         settled = true;
         if ((sshExitCode ?? 0) !== 0) {
           reject(new Error(sshStderr.trim() || `ssh exited with code ${sshExitCode ?? -1}`));
@@ -1592,50 +2526,50 @@ export async function syncDirectoryFromSsh(input: {
         }
         resolve();
       };
-
       const fail = (error: Error) => {
-        if (settled) return;
+        if (settled || session.isAborting()) return;
         settled = true;
-        ssh.kill("SIGTERM");
-        tar.kill("SIGTERM");
-        reject(error);
+        void session.cancel().finally(() => rejectOnce(error));
       };
-
+      const onStreamError = (error: NodeJS.ErrnoException) => {
+        if (session.isAborting() || isPipeNoise(error, session.isAborting())) return;
+        fail(error);
+      };
       if (progress) {
-        progress.counter.on("error", fail);
+        progress.counter.on("error", (error) => onStreamError(error as NodeJS.ErrnoException));
+        ssh.stdout?.on("error", onStreamError);
         ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
       } else {
+        ssh.stdout?.on("error", onStreamError);
         ssh.stdout?.pipe(tar.stdin ?? null);
       }
-      ssh.stderr?.on("data", (chunk) => {
-        sshStderr += String(chunk);
-      });
-      tar.stderr?.on("data", (chunk) => {
-        tarStderr += String(chunk);
-      });
-
+      tar.stdin?.on("error", onStreamError);
+      ssh.stderr?.on("data", (chunk) => { sshStderr += String(chunk); });
+      tar.stderr?.on("data", (chunk) => { tarStderr += String(chunk); });
       ssh.on("error", fail);
       tar.on("error", fail);
-      ssh.on("close", (code) => {
-        sshExited = true;
-        sshExitCode = code;
-        maybeFinish();
-      });
-      tar.on("close", (code) => {
-        tarExited = true;
-        tarExitCode = code;
-        maybeFinish();
-      });
+      ssh.on("close", (code) => { sshExited = true; sshExitCode = code; maybeFinish(); });
+      tar.on("close", (code) => { tarExited = true; tarExitCode = code; maybeFinish(); });
+      if (input.signal?.aborted) session.finishAbort(rejectOnce);
     });
+    if (session.isAborting()) throw new WorkspaceOperationAbortedError();
     await progress?.finish();
-
-    await clearLocalDirectory(input.localDir, input.preserveLocalEntries);
+    await clearLocalDirectory(
+      input.localDir,
+      input.preserveLocalEntries,
+      input.preserveSecretFiles ? secretPathExcluded : undefined,
+    );
     await copyDirectoryContents(stagingDir, input.localDir);
   } catch (error) {
+    if (!session.isAborting() && input.signal?.aborted) await session.cancel();
     await progress?.fail();
     throw error;
   } finally {
-    await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    session.detach();
+    await fs.rm(stagingDir, { recursive: true, force: true }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`SSH restore staging cleanup failed: ${message}`);
+    });
     await auth.cleanup();
   }
 }
@@ -1647,10 +2581,26 @@ export async function prepareWorkspaceForSshExecution(input: {
   onProgress?: RuntimeProgressSink;
   workspaceFileMode?: "all";
   workspaceExclude?: string[];
-}): Promise<{ gitBacked: boolean; repositories?: string[]; excludedPaths?: string[] }> {
+  signal?: AbortSignal;
+  transferLimits?: WorkspaceTransferLimits;
+}): Promise<{ gitBacked: boolean; repositories?: string[]; excludedPaths?: string[]; transferExcludes: string[] }> {
+  throwIfAborted(input.signal);
   const remoteDir = input.remoteDir ?? input.spec.remoteCwd;
-  const gitSnapshot = input.workspaceFileMode === "all" ? null : await readLocalGitWorkspaceSnapshot(input.localDir);
   const excludedPaths = await listProjectRepositoryStagingPaths(input.localDir);
+  const transferExcludes = await resolveWorkspaceTransferExcludes({
+    localDir: input.localDir,
+    workspaceFileMode: input.workspaceFileMode,
+    workspaceExclude: input.workspaceExclude,
+    extra: excludedPaths,
+    signal: input.signal,
+  });
+  await assertWorkspaceTransferWithinLimits({
+    localDir: input.localDir,
+    exclude: transferExcludes,
+    limits: input.transferLimits,
+    signal: input.signal,
+  });
+  const gitSnapshot = input.workspaceFileMode === "all" ? null : await readLocalGitWorkspaceSnapshot(input.localDir);
   const excludedResult = excludedPaths.length > 0 ? { excludedPaths } : {};
 
   if (gitSnapshot) {
@@ -1660,9 +2610,11 @@ export async function prepareWorkspaceForSshExecution(input: {
       localDir: input.localDir,
       remoteDir,
       snapshot: gitSnapshot,
-      exclude: repositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : excludedPaths,
+      exclude: transferExcludes,
       onProgress: input.onProgress,
       progressLabel: "workspace",
+      signal: input.signal,
+      transferLimits: input.transferLimits,
     });
     if (repositories.length > 0) {
       await excludeProjectRepositoriesOnSsh(input.spec, remoteDir);
@@ -1678,9 +2630,12 @@ export async function prepareWorkspaceForSshExecution(input: {
         snapshot,
         onProgress: input.onProgress,
         progressLabel: relative,
+        signal: input.signal,
+        transferLimits: input.transferLimits,
+        exclude: transferExcludes,
       });
     }
-    return { gitBacked: true, ...(repositories.length > 0 ? { repositories } : {}), ...excludedResult };
+    return { gitBacked: true, ...(repositories.length > 0 ? { repositories } : {}), ...excludedResult, transferExcludes };
   }
 
   await clearRemoteDirectory({
@@ -1692,11 +2647,13 @@ export async function prepareWorkspaceForSshExecution(input: {
     spec: input.spec,
     localDir: input.localDir,
     remoteDir,
-    exclude: [".paperclip-runtime", ...excludedPaths, ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
+    exclude: transferExcludes,
     onProgress: input.onProgress,
     progressLabel: "workspace",
+    signal: input.signal,
+    transferLimits: input.transferLimits,
   });
-  return { gitBacked: false, ...excludedResult };
+  return { gitBacked: false, ...excludedResult, transferExcludes };
 }
 
 export async function restoreWorkspaceFromSshExecution(input: {
@@ -1707,7 +2664,9 @@ export async function restoreWorkspaceFromSshExecution(input: {
   restoreGitHistory?: boolean;
   onProgress?: RuntimeProgressSink;
   repositories?: Array<{ path: string; baselineSnapshot?: DirectorySnapshot }>;
+  signal?: AbortSignal;
 }): Promise<void> {
+  throwIfAborted(input.signal);
   const remoteDir = input.remoteDir ?? input.spec.remoteCwd;
   const repositories = input.repositories ?? [];
   for (const repository of repositories) {
@@ -1737,6 +2696,7 @@ export async function restoreWorkspaceFromSshExecution(input: {
       restoreGitHistory: input.restoreGitHistory,
       onProgress: input.onProgress,
       progressLabel: repository.path,
+      signal: input.signal,
     });
   }
   await restoreWorkspaceRootFromSsh({
@@ -1748,6 +2708,154 @@ export async function restoreWorkspaceFromSshExecution(input: {
     onProgress: input.onProgress,
     progressLabel: "workspace",
     hasProjectRepositories: repositories.length > 0,
+    signal: input.signal,
+  });
+}
+
+interface GitStage {
+  mode: string;
+  sha: string;
+}
+
+interface StagedDivergence {
+  path: string;
+  head: GitStage | null;
+  index: GitStage | null;
+}
+
+function parseIndexStages(stdout: string): Array<GitStage & { stage: string; path: string }> {
+  const entries: Array<GitStage & { stage: string; path: string }> = [];
+  for (const record of stdout.split("\0")) {
+    if (!record) continue;
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, sha, stage] = record.slice(0, tab).split(" ");
+    const filePath = record.slice(tab + 1);
+    if (!mode || !sha || !filePath) continue;
+    entries.push({ mode, sha, stage: stage ?? "0", path: filePath });
+  }
+  return entries;
+}
+
+function sameGitStage(left: GitStage | null, right: GitStage | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.mode === right.mode && left.sha === right.sha;
+}
+
+function stageMap(entries: readonly GitIndexEntry[]): Map<string, GitStage> {
+  return new Map(entries.map((entry) => [entry.path, { mode: entry.mode, sha: entry.sha }]));
+}
+
+async function listIndexStages(localDir: string): Promise<Array<GitStage & { stage: string; path: string }>> {
+  const listed = await runLocalGit(localDir, ["ls-files", "--stage", "-z"], {
+    timeout: 60_000,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  return parseIndexStages(listed.stdout);
+}
+
+async function readStagedDivergences(localDir: string, headCommit: string): Promise<StagedDivergence[]> {
+  const stages = await listIndexStages(localDir);
+  if (stages.some((entry) => entry.stage !== "0")) {
+    throw new Error("Cannot restore the workspace because the local git index has unresolved conflicts.");
+  }
+  const index = new Map(stages.map((entry) => [entry.path, { mode: entry.mode, sha: entry.sha }]));
+  const head = stageMap(await listCommitEntries(localDir, headCommit));
+  const divergences: StagedDivergence[] = [];
+  for (const filePath of new Set([...index.keys(), ...head.keys()])) {
+    const indexStage = index.get(filePath) ?? null;
+    const headStage = head.get(filePath) ?? null;
+    if (!sameGitStage(indexStage, headStage)) {
+      divergences.push({ path: filePath, head: headStage, index: indexStage });
+    }
+  }
+  return divergences;
+}
+
+function conflictingStagedPaths(divergences: readonly StagedDivergence[], next: Map<string, GitStage>): string[] {
+  const conflicts: string[] = [];
+  for (const divergence of divergences) {
+    const nextStage = next.get(divergence.path) ?? null;
+    if (sameGitStage(nextStage, divergence.head) || sameGitStage(nextStage, divergence.index)) continue;
+    conflicts.push(divergence.path);
+  }
+  return conflicts.sort();
+}
+
+function assertStagedChangesReconcilable(divergences: readonly StagedDivergence[], next: Map<string, GitStage>): void {
+  const conflicts = conflictingStagedPaths(divergences, next);
+  if (conflicts.length === 0) return;
+  throw new Error(`Cannot reconcile local staged changes with the restored git history: ${conflicts.join(", ")}`);
+}
+
+// The tree integrateImportedGitHead would publish, or null when that call
+// leaves the branch where it is or when the merge itself will fail closed.
+async function predictedRestoredTree(localDir: string, currentHead: string, importedHead: string): Promise<string | null> {
+  if (currentHead === importedHead) return null;
+  let noCommonAncestor = false;
+  const mergeBase = await runLocalGit(localDir, ["merge-base", currentHead, importedHead], {
+    timeout: 10_000,
+    maxBuffer: 16 * 1024,
+  }).catch((error: unknown) => {
+    noCommonAncestor = (error as { code?: unknown } | null)?.code === 1;
+    return null;
+  });
+  const mergeBaseHead = mergeBase?.stdout.trim() ?? "";
+  if (mergeBaseHead === importedHead) return null;
+  if (mergeBaseHead === currentHead || noCommonAncestor) {
+    return (await runLocalGit(localDir, ["rev-parse", `${importedHead}^{tree}`], {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024,
+    })).stdout.trim();
+  }
+  if (!mergeBase) return null;
+  try {
+    const merged = await runLocalGit(localDir, ["merge-tree", "--write-tree", currentHead, importedHead], {
+      timeout: 60_000,
+      maxBuffer: 256 * 1024,
+    });
+    return merged.stdout.trim().split("\n")[0]?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// `update-ref` moves the branch and leaves the index on the previous HEAD.
+// A later commit would then record every restored path as a staged deletion.
+// Reset the index to the published HEAD, then put back staged entries whose
+// committed blob did not change.
+async function alignLocalGitIndex(localDir: string, capturedHead: string, divergences: readonly StagedDivergence[]): Promise<void> {
+  const newHead = (await runLocalGit(localDir, ["rev-parse", "HEAD"], {
+    timeout: 10_000,
+    maxBuffer: 16 * 1024,
+  })).stdout.trim();
+  if (newHead === capturedHead) return;
+  const next = stageMap(await listCommitEntries(localDir, newHead));
+  assertStagedChangesReconcilable(divergences, next);
+  try {
+    await runLocalGit(localDir, ["reset", "--quiet", "HEAD", "--", "."], {
+      timeout: 60_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to reset the local git index to HEAD after workspace restore: ${reason}`);
+  }
+  const restorations: string[] = [];
+  for (const divergence of divergences) {
+    const nextStage = next.get(divergence.path) ?? null;
+    if (!sameGitStage(nextStage, divergence.head)) continue;
+    if (divergence.index === null) {
+      restorations.push(`0 0000000000000000000000000000000000000000 0\t${divergence.path}\0`);
+    } else {
+      restorations.push(`${divergence.index.mode} ${divergence.index.sha} 0\t${divergence.path}\0`);
+    }
+  }
+  if (restorations.length === 0) return;
+  await runLocalGit(localDir, ["update-index", "-z", "--index-info"], {
+    timeout: 60_000,
+    maxBuffer: 1024 * 1024,
+    stdin: restorations.join(""),
   });
 }
 
@@ -1760,7 +2868,9 @@ async function restoreWorkspaceRootFromSsh(input: {
   onProgress?: RuntimeProgressSink;
   progressLabel: string;
   hasProjectRepositories?: boolean;
+  signal?: AbortSignal;
 }): Promise<void> {
+  throwIfAborted(input.signal);
   const remoteDir = input.remoteDir;
   if (input.baselineSnapshot) {
     const stagingDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-sync-back-"));
@@ -1785,19 +2895,42 @@ async function restoreWorkspaceRootFromSsh(input: {
         exclude: input.baselineSnapshot.exclude,
         onProgress: input.onProgress,
         progressLabel: input.progressLabel,
+        signal: input.signal,
       });
+      let capturedHead: string | null = null;
+      let stagedDivergences: StagedDivergence[] = [];
       await mergeDirectoryWithBaseline({
         baseline: input.baselineSnapshot,
         sourceDir: stagingDir,
         targetDir: input.localDir,
+        signal: input.signal,
         // Git history advances via integrateImportedGitHead; the working tree
         // still comes from the remote file snapshot so dirty remote edits win.
+        // The index is aligned afterwards: update-ref does not move it.
         beforeApply: importedHead
           ? async () => {
+            const snapshot = await readLocalGitWorkspaceSnapshot(input.localDir);
+            if (!snapshot?.headCommit) {
+              throw new Error("Cannot restore git history because the local directory is not a git work tree.");
+            }
+            capturedHead = snapshot.headCommit;
+            stagedDivergences = await readStagedDivergences(input.localDir, snapshot.headCommit);
+            if (stagedDivergences.length > 0) {
+              const tree = await predictedRestoredTree(input.localDir, snapshot.headCommit, importedHead);
+              if (tree) {
+                assertStagedChangesReconcilable(stagedDivergences, stageMap(await listCommitEntries(input.localDir, tree)));
+              }
+            }
             await integrateImportedGitHead({
               localDir: input.localDir,
               importedHead,
             });
+          }
+          : undefined,
+        afterApply: importedHead
+          ? async () => {
+            if (!capturedHead) return;
+            await alignLocalGitIndex(input.localDir, capturedHead, stagedDivergences);
           }
           : undefined,
       });
@@ -1826,10 +2959,12 @@ async function restoreWorkspaceRootFromSsh(input: {
       spec: input.spec,
       remoteDir,
       localDir: input.localDir,
-      exclude: [".git", ".paperclip-runtime", ...projectRepositoryEntries],
+      exclude: [".git", ".paperclip-runtime", ...secretTransferExcludes(), ...projectRepositoryEntries],
       preserveLocalEntries: [".git", ...projectRepositoryEntries],
+      preserveSecretFiles: true,
       onProgress: input.onProgress,
       progressLabel: input.progressLabel,
+      signal: input.signal,
     });
     return;
   }
@@ -1838,9 +2973,11 @@ async function restoreWorkspaceRootFromSsh(input: {
     spec: input.spec,
     remoteDir,
     localDir: input.localDir,
-    exclude: [".paperclip-runtime"],
+    exclude: [".paperclip-runtime", ".git", ...secretTransferExcludes()],
+    preserveSecretFiles: true,
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
+    signal: input.signal,
   });
 }
 

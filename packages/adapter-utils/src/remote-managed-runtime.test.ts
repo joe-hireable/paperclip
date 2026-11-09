@@ -28,6 +28,7 @@ vi.mock("./ssh.js", () => ({
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 import { resolveReferencedSourceIgnore } from "./sandbox-managed-runtime.js";
 import { setExpensiveWorkspaceGitExecutor } from "./git-workspace-sync.js";
+import { WorkspaceOperationAbortedError } from "./workspace-restore-merge.js";
 
 describe("remote managed runtime", () => {
   const cleanupDirs: string[] = [];
@@ -469,5 +470,50 @@ describe("remote managed runtime", () => {
     runSshCommand.mockClear();
     await prepared.restoreWorkspace();
     expect(runSshCommand.mock.calls.map((call) => String(call[1])).some((command) => command.startsWith("rm "))).toBe(false);
+  });
+
+  function restoreSshCommandMock() {
+    runSshCommand.mockImplementation(async () => ({
+      stdout: Buffer.from('{"token":"remote"}\n').toString("base64"),
+      stderr: "",
+    }));
+  }
+
+  it("removes this run's staging directory after cancel and still reports the abort", async () => {
+    prepareWorkspaceForSshExecution.mockRejectedValueOnce(new WorkspaceOperationAbortedError());
+    const commands: string[] = [];
+    runSshCommand.mockImplementation(async (_spec: unknown, command: string) => {
+      commands.push(command);
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      await expect(prepareRemoteManagedRuntime({
+        spec: sshSpec,
+        runId: "run-cancel",
+        adapterKey: "codex",
+        workspaceLocalDir: "/tmp/paperclip-local-cancel",
+      })).rejects.toMatchObject({ code: "WORKSPACE_SYNC_ABORTED" });
+      expect(commands.some((command) => command.includes("rm -rf --") && command.includes("/.paperclip-runtime/runs/run-cancel") && !command.includes("run-other"))).toBe(true);
+    } finally {
+      restoreSshCommandMock();
+    }
+  });
+
+  it("surfaces a failed staging removal after cancel", async () => {
+    prepareWorkspaceForSshExecution.mockRejectedValueOnce(new WorkspaceOperationAbortedError());
+    runSshCommand.mockImplementation(async (_spec: unknown, command: string) => {
+      if (command.includes("rm -rf --")) throw new Error("cleanup refused");
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      await expect(prepareRemoteManagedRuntime({
+        spec: sshSpec,
+        runId: "run-cleanup-fail-cancel",
+        adapterKey: "codex",
+        workspaceLocalDir: "/tmp/paperclip-local-cancel",
+      })).rejects.toThrow(/cleanup refused/);
+    } finally {
+      restoreSshCommandMock();
+    }
   });
 });

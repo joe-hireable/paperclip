@@ -6,6 +6,8 @@ import {
   runSshCommand,
   restoreWorkspaceFromSshExecution,
   syncDirectoryToSsh,
+  validateExistingRemoteWorkspace,
+  type WorkspaceTransferLimits,
 } from "./ssh.js";
 import {
   mergeExcludes,
@@ -13,7 +15,7 @@ import {
   type SandboxAdditionalSource,
   type SandboxManagedRuntimeAssetRestoreContext,
 } from "./sandbox-managed-runtime.js";
-import { captureDirectorySnapshot, type DirectorySnapshot } from "./workspace-restore-merge.js";
+import { captureDirectorySnapshot, WorkspaceOperationAbortedError, type DirectorySnapshot } from "./workspace-restore-merge.js";
 import type { RuntimeProgressSink } from "./runtime-progress.js";
 
 // The fixed heavy-directory excludes every referenced project drops,
@@ -99,6 +101,45 @@ function stagedAuthPath(assetDir: string): string | null {
   return authPath.endsWith("/auth.json") ? authPath : null;
 }
 
+async function removeOwnedRunStaging(spec: SshRemoteExecutionSpec, runDir: string): Promise<void> {
+  const runId = path.posix.basename(runDir);
+  const parent = path.posix.dirname(runDir);
+  if (!REMOTE_RUN_ID_PATTERN.test(runId) || !parent.endsWith("/.paperclip-runtime/runs")) {
+    throw new Error("Remote run staging cleanup refused an unowned path.");
+  }
+  // No trailing slash: GNU rm -rf on a symlink with a slash follows it and
+  // would delete the target. The remote checks refuse a symlink outright.
+  const script = [
+    "set -e",
+    `parent=${shellQuote(parent)}`,
+    `run_id=${shellQuote(runId)}`,
+    `run_dir=${shellQuote(runDir)}`,
+    'case "$run_id" in',
+    '  ""|-*|*[!A-Za-z0-9_-]*) echo "refused run id" >&2; exit 2 ;;',
+    "esac",
+    'case "$parent" in',
+    '  */.paperclip-runtime/runs) ;;',
+    '  *) echo "refused parent" >&2; exit 2 ;;',
+    "esac",
+    '[ "$parent/$run_id" = "$run_dir" ] || { echo "refused path" >&2; exit 2; }',
+    'if [ ! -d "$parent" ]; then exit 0; fi',
+    'if [ -L "$parent" ] || [ -L "$parent/$run_id" ]; then echo "refused symlink" >&2; exit 3; fi',
+    'if [ ! -e "$parent/$run_id" ]; then exit 0; fi',
+    'canonical_parent=$(cd -- "$parent" && pwd -P)',
+    'case "$canonical_parent" in',
+    '  */.paperclip-runtime/runs) ;;',
+    '  *) echo "refused canonical parent" >&2; exit 2 ;;',
+    "esac",
+    'rm -rf -- "$canonical_parent/$run_id"',
+  ].join("\n");
+  try {
+    await runSshCommand(spec, script, { timeoutMs: 30_000 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Remote run staging cleanup failed: ${message}`, { cause: error });
+  }
+}
+
 async function bestEffortRemoteRemove(
   spec: SshRemoteExecutionSpec,
   remotePath: string,
@@ -165,10 +206,28 @@ export async function prepareRemoteManagedRuntime(input: {
   // Upload progress sink. Threaded for the byte-counting transport rewrite; the
   // child task wires it into the workspace/asset transfers.
   onProgress?: RuntimeProgressSink;
+  signal?: AbortSignal;
+  transferLimits?: WorkspaceTransferLimits;
+  /**
+   * Attach this existing remote directory instead of uploading the controller
+   * tree. A missing or invalid path fails before any transfer.
+   */
+  attachExistingRemoteCwd?: { remoteCwd: string; allowedRoot: string } | null;
 }): Promise<PreparedRemoteManagedRuntime> {
+  if (input.signal?.aborted) throw new WorkspaceOperationAbortedError();
   const baseWorkspaceRemoteDir = input.workspaceRemoteDir ?? input.spec.remoteCwd;
-  const syncWorkspace = input.syncWorkspace !== false;
-  const workspaceRemoteDir = syncWorkspace
+  let syncWorkspace = input.syncWorkspace !== false;
+  let attachedRoot: string | null = null;
+  if (input.attachExistingRemoteCwd) {
+    attachedRoot = await validateExistingRemoteWorkspace({
+      spec: input.spec,
+      remoteCwd: input.attachExistingRemoteCwd.remoteCwd,
+      allowedRoot: input.attachExistingRemoteCwd.allowedRoot,
+      signal: input.signal,
+    });
+    syncWorkspace = false;
+  }
+  const workspaceRemoteDir = attachedRoot ?? (syncWorkspace
     ? path.posix.join(
         baseWorkspaceRemoteDir,
         ".paperclip-runtime",
@@ -176,9 +235,11 @@ export async function prepareRemoteManagedRuntime(input: {
         input.runId,
         "workspace",
       )
-    : baseWorkspaceRemoteDir;
+    : baseWorkspaceRemoteDir);
   const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const ownedRunDir = syncWorkspace ? remotePerRunDir(baseWorkspaceRemoteDir, input.runId) : null;
 
+  try {
   const preparedWorkspace = syncWorkspace
     ? await prepareWorkspaceForSshExecution({
         spec: input.spec,
@@ -187,18 +248,23 @@ export async function prepareRemoteManagedRuntime(input: {
         onProgress: input.onProgress,
         workspaceFileMode: input.workspaceFileMode,
         workspaceExclude: input.workspaceExclude,
+        signal: input.signal,
+        transferLimits: input.transferLimits,
       })
     : null;
   const projectRepositories = preparedWorkspace?.repositories ?? [];
   const baselineSnapshot = preparedWorkspace
     ? await captureDirectorySnapshot(input.workspaceLocalDir, {
-        exclude: preparedWorkspace.gitBacked
-          ? [
-              ...GIT_ARCHIVE_EXCLUDES,
-              ".paperclip-runtime",
-              ...(projectRepositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : preparedWorkspace.excludedPaths ?? []),
-            ]
-          : [".paperclip-runtime", ...(preparedWorkspace.excludedPaths ?? []), ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])],
+        exclude: preparedWorkspace.transferExcludes ?? (
+          preparedWorkspace.gitBacked
+            ? [
+                ...GIT_ARCHIVE_EXCLUDES,
+                ".paperclip-runtime",
+                ...(projectRepositories.length > 0 ? [PROJECT_REPOSITORIES_DIR] : preparedWorkspace.excludedPaths ?? []),
+              ]
+            : [".paperclip-runtime", ...(preparedWorkspace.excludedPaths ?? []), ...(input.workspaceFileMode === "all" ? input.workspaceExclude ?? [] : [])]
+        ),
+        signal: input.signal,
       })
     : null;
   const repositoryBaselines: Array<{ path: string; baselineSnapshot: DirectorySnapshot }> = [];
@@ -224,6 +290,7 @@ export async function prepareRemoteManagedRuntime(input: {
         exclude: asset.exclude,
         onProgress: input.onProgress,
         progressLabel: asset.key,
+        signal: input.signal,
       });
     }
   } catch (error) {
@@ -236,6 +303,7 @@ export async function prepareRemoteManagedRuntime(input: {
         restoreGitHistory: preparedWorkspace.gitBacked,
         onProgress: input.onProgress,
         repositories: repositoryBaselines,
+        signal: input.signal,
       });
     }
     throw error;
@@ -278,9 +346,11 @@ export async function prepareRemoteManagedRuntime(input: {
         exclude,
         onProgress: input.onProgress,
         progressLabel: `project-${projectId}`,
+        signal: input.signal,
       });
       additionalSourceDirs[projectId] = remoteDir;
     } catch (error) {
+      if (error instanceof WorkspaceOperationAbortedError) throw error;
       console.warn(
         `[paperclip] Failed to stage referenced project ${projectId}; skipping it. ${String(error)}`,
       );
@@ -311,6 +381,7 @@ export async function prepareRemoteManagedRuntime(input: {
             restoreGitHistory: preparedWorkspace.gitBacked,
             onProgress,
             repositories: repositoryBaselines,
+            signal: input.signal,
           });
         }
         for (const asset of input.assets ?? []) {
@@ -338,4 +409,10 @@ export async function prepareRemoteManagedRuntime(input: {
       if (restoreError) throw restoreError;
     },
   };
+  } catch (error) {
+    if (error instanceof WorkspaceOperationAbortedError && ownedRunDir) {
+      await removeOwnedRunStaging(input.spec, ownedRunDir);
+    }
+    throw error;
+  }
 }
