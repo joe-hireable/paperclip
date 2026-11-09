@@ -101,6 +101,45 @@ function stagedAuthPath(assetDir: string): string | null {
   return authPath.endsWith("/auth.json") ? authPath : null;
 }
 
+async function removeOwnedRunStaging(spec: SshRemoteExecutionSpec, runDir: string): Promise<void> {
+  const runId = path.posix.basename(runDir);
+  const parent = path.posix.dirname(runDir);
+  if (!REMOTE_RUN_ID_PATTERN.test(runId) || !parent.endsWith("/.paperclip-runtime/runs")) {
+    throw new Error("Remote run staging cleanup refused an unowned path.");
+  }
+  // No trailing slash: GNU rm -rf on a symlink with a slash follows it and
+  // would delete the target. The remote checks refuse a symlink outright.
+  const script = [
+    "set -e",
+    `parent=${shellQuote(parent)}`,
+    `run_id=${shellQuote(runId)}`,
+    `run_dir=${shellQuote(runDir)}`,
+    'case "$run_id" in',
+    '  ""|-*|*[!A-Za-z0-9_-]*) echo "refused run id" >&2; exit 2 ;;',
+    "esac",
+    'case "$parent" in',
+    '  */.paperclip-runtime/runs) ;;',
+    '  *) echo "refused parent" >&2; exit 2 ;;',
+    "esac",
+    '[ "$parent/$run_id" = "$run_dir" ] || { echo "refused path" >&2; exit 2; }',
+    'if [ ! -d "$parent" ]; then exit 0; fi',
+    'if [ -L "$parent" ] || [ -L "$parent/$run_id" ]; then echo "refused symlink" >&2; exit 3; fi',
+    'if [ ! -e "$parent/$run_id" ]; then exit 0; fi',
+    'canonical_parent=$(cd -- "$parent" && pwd -P)',
+    'case "$canonical_parent" in',
+    '  */.paperclip-runtime/runs) ;;',
+    '  *) echo "refused canonical parent" >&2; exit 2 ;;',
+    "esac",
+    'rm -rf -- "$canonical_parent/$run_id"',
+  ].join("\n");
+  try {
+    await runSshCommand(spec, script, { timeoutMs: 30_000 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Remote run staging cleanup failed: ${message}`, { cause: error });
+  }
+}
+
 async function bestEffortRemoteRemove(
   spec: SshRemoteExecutionSpec,
   remotePath: string,
@@ -198,7 +237,9 @@ export async function prepareRemoteManagedRuntime(input: {
       )
     : baseWorkspaceRemoteDir);
   const runtimeRootDir = path.posix.join(workspaceRemoteDir, ".paperclip-runtime", input.adapterKey);
+  const ownedRunDir = syncWorkspace ? remotePerRunDir(baseWorkspaceRemoteDir, input.runId) : null;
 
+  try {
   const preparedWorkspace = syncWorkspace
     ? await prepareWorkspaceForSshExecution({
         spec: input.spec,
@@ -368,4 +409,10 @@ export async function prepareRemoteManagedRuntime(input: {
       if (restoreError) throw restoreError;
     },
   };
+  } catch (error) {
+    if (error instanceof WorkspaceOperationAbortedError && ownedRunDir) {
+      await removeOwnedRunStaging(input.spec, ownedRunDir);
+    }
+    throw error;
+  }
 }
