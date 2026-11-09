@@ -281,6 +281,14 @@ export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionS
   };
 }
 
+function isSyncAbort(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (!error || typeof error !== "object") return false;
+  const name = (error as { name?: unknown }).name;
+  const code = (error as { code?: unknown }).code;
+  return name === "AbortError" || code === "ABORT_ERR";
+}
+
 async function execFileText(
   file: string,
   args: string[],
@@ -301,6 +309,10 @@ async function execFileText(
       },
       (error, stdout, stderr) => {
         if (error) {
+          if (isSyncAbort(error, options.signal)) {
+            reject(new WorkspaceOperationAbortedError());
+            return;
+          }
           reject(Object.assign(error, { stdout: stdout ?? "", stderr: stderr ?? "" }));
           return;
         }
@@ -407,6 +419,12 @@ async function spawnText(
 
     child.on("error", (error) => {
       clearTimers();
+      if (isSyncAbort(error, options.signal)) {
+        if (settled) return;
+        settled = true;
+        reject(new WorkspaceOperationAbortedError());
+        return;
+      }
       finishReject(Object.assign(error, { code: null }));
     });
 
@@ -414,6 +432,10 @@ async function spawnText(
       clearTimers();
       if (settled) return;
       settled = true;
+      if (isSyncAbort(undefined, options.signal)) {
+        reject(new WorkspaceOperationAbortedError());
+        return;
+      }
       if (code === 0) {
         resolve({ stdout, stderr });
         return;
@@ -433,15 +455,71 @@ async function spawnText(
   });
 }
 
+function gitCommandEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  // A caller-level GIT_DIR would make `-C` write the snapshot into the wrong
+  // repository. The index override is explicit and must survive.
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  if (!extra?.GIT_INDEX_FILE) delete env.GIT_INDEX_FILE;
+  return env;
+}
+
 async function runLocalGit(
   localDir: string,
   args: string[],
   options: {
     timeout?: number;
     maxBuffer?: number;
+    env?: NodeJS.ProcessEnv;
+    stdin?: string | Buffer;
   } = {},
 ): Promise<SshCommandResult> {
-  return await execFileText("git", ["-C", localDir, ...args], options);
+  if (options.stdin == null && options.env == null) {
+    return await execFileText("git", ["-C", localDir, ...args], options);
+  }
+  const maxBuffer = options.maxBuffer ?? 1024 * 128;
+  return await new Promise<SshCommandResult>((resolve, reject) => {
+    const child = spawn("git", ["-C", localDir, ...args], {
+      env: gitCommandEnv(options.env),
+      stdio: [options.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timeout: NodeJS.Timeout | null = null;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (error) reject(Object.assign(error, { stdout, stderr }));
+      else resolve({ stdout, stderr });
+    };
+    if (options.timeout && options.timeout > 0) {
+      timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(new Error(`git ${args[0] ?? "command"} timed out`));
+      }, options.timeout);
+    }
+    const append = (streamName: "stdout" | "stderr", chunk: unknown) => {
+      const text = String(chunk);
+      if (streamName === "stdout") stdout += text;
+      else stderr += text;
+      if (Buffer.byteLength(stdout, "utf8") > maxBuffer || Buffer.byteLength(stderr, "utf8") > maxBuffer) {
+        child.kill("SIGKILL");
+        finish(new Error(`git ${args[0] ?? "command"} output exceeded maxBuffer of ${maxBuffer} bytes.`));
+      }
+    };
+    child.stdout?.on("data", (chunk) => append("stdout", chunk));
+    child.stderr?.on("data", (chunk) => append("stderr", chunk));
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      if (code === 0) finish();
+      else finish(new Error(stderr.trim() || stdout.trim() || `git exited with code ${code ?? -1}`));
+    });
+    child.stdin?.on("error", () => {});
+    if (options.stdin != null && child.stdin) child.stdin.end(options.stdin);
+  });
 }
 
 async function commandExists(command: string): Promise<boolean> {
@@ -739,15 +817,36 @@ async function runSshScript(
 async function clearLocalDirectory(
   localDir: string,
   preserveEntries: string[] = [],
+  preserveRelative?: (relative: string) => boolean,
 ): Promise<void> {
   await fs.mkdir(localDir, { recursive: true });
   const preserve = new Set(preserveEntries);
-  const entries = await fs.readdir(localDir);
-  await Promise.all(
-    entries
-      .filter((entry) => !preserve.has(entry))
-      .map((entry) => fs.rm(path.join(localDir, entry), { recursive: true, force: true })),
-  );
+  if (!preserveRelative) {
+    const entries = await fs.readdir(localDir);
+    await Promise.all(
+      entries
+        .filter((entry) => !preserve.has(entry))
+        .map((entry) => fs.rm(path.join(localDir, entry), { recursive: true, force: true })),
+    );
+    return;
+  }
+  const walk = async (dir: string, relative: string): Promise<void> => {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    await Promise.all(entries.map(async (entry) => {
+      if (!relative && preserve.has(entry.name)) return;
+      const rel = relative ? `${relative}/${entry.name}` : entry.name;
+      const full = path.join(dir, entry.name);
+      if (preserveRelative(rel)) return;
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        await walk(full, rel);
+        const remaining = await fs.readdir(full).catch(() => ["kept"]);
+        if (remaining.length === 0) await fs.rmdir(full).catch(() => undefined);
+        return;
+      }
+      await fs.rm(full, { recursive: true, force: true });
+    }));
+  };
+  await walk(localDir, "");
 }
 
 async function copyDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
@@ -952,6 +1051,217 @@ function remoteSecretWorktreeSweep(remoteDir: string): string {
   ].join("\n");
 }
 
+// The remote repository is a parentless snapshot of the current tree, not a
+// copy of local history. Deny-listed paths are removed before the tree is
+// written, so their blobs are not reachable from the snapshot and a bundle of
+// that commit cannot carry them. Commit hashes differ from the local
+// repository, and the remote history starts at depth 1 plus whatever the
+// remote itself commits. Other branches, stashes, and older commits stay
+// local. On the way back, remote commits are replayed onto the recorded
+// source commit with the local deny-listed entries restored, so a remote
+// commit still lands and local history and those files stay untouched. A
+// remote that does not commit does not move the local branch.
+const FILTERED_SNAPSHOT_TRAILER = "Paperclip-Filtered-Snapshot";
+const FILTERED_SNAPSHOT_EPOCH = "1970-01-01T00:00:00Z";
+
+interface GitIndexEntry {
+  mode: string;
+  sha: string;
+  path: string;
+}
+
+function secretPathExcluded(relative: string): boolean {
+  return shouldExcludePath(relative, secretTransferExcludes());
+}
+
+function parseTreeListing(stdout: string): GitIndexEntry[] {
+  const entries: GitIndexEntry[] = [];
+  for (const record of stdout.split("\0")) {
+    if (!record) continue;
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, type, sha] = record.slice(0, tab).split(" ");
+    const filePath = record.slice(tab + 1);
+    if (!mode || !sha || !filePath || (type !== "blob" && type !== "commit")) continue;
+    entries.push({ mode, sha, path: filePath });
+  }
+  return entries;
+}
+
+async function listCommitEntries(localDir: string, commit: string): Promise<GitIndexEntry[]> {
+  const listed = await runLocalGit(localDir, ["ls-tree", "-r", "-z", commit], {
+    timeout: 60_000,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  return parseTreeListing(listed.stdout);
+}
+
+async function writeTreeFromEntries(localDir: string, entries: readonly GitIndexEntry[]): Promise<string> {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-index-"));
+  const index = path.join(temp, "index");
+  try {
+    await runLocalGit(localDir, ["read-tree", "--empty"], {
+      timeout: 30_000,
+      maxBuffer: 16 * 1024,
+      env: { GIT_INDEX_FILE: index },
+    });
+    if (entries.length > 0) {
+      const info = entries.map((entry) => `${entry.mode} ${entry.sha} 0\t${entry.path}\0`).join("");
+      await runLocalGit(localDir, ["update-index", "-z", "--index-info"], {
+        timeout: 60_000,
+        maxBuffer: 64 * 1024,
+        env: { GIT_INDEX_FILE: index },
+        stdin: info,
+      });
+    }
+    const tree = await runLocalGit(localDir, ["write-tree"], {
+      timeout: 60_000,
+      maxBuffer: 16 * 1024,
+      env: { GIT_INDEX_FILE: index },
+    });
+    const sha = tree.stdout.trim();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("Failed to write a filtered git tree.");
+    return sha;
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function commitTree(input: {
+  localDir: string;
+  tree: string;
+  parent?: string;
+  message: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-commit-"));
+  const messageFile = path.join(dir, "message");
+  try {
+    await fs.writeFile(messageFile, input.message.length > 0 ? input.message : "\n");
+    const args = ["commit-tree", input.tree];
+    if (input.parent) args.push("-p", input.parent);
+    args.push("-F", messageFile);
+    const created = await runLocalGit(input.localDir, args, {
+      timeout: 30_000,
+      maxBuffer: 16 * 1024,
+      env: input.env,
+    });
+    const sha = created.stdout.trim();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("Failed to write a filtered git commit.");
+    return sha;
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function createFilteredSnapshotCommit(localDir: string, sourceCommit: string): Promise<string> {
+  const entries = (await listCommitEntries(localDir, sourceCommit))
+    .filter((entry) => !secretPathExcluded(entry.path));
+  const tree = await writeTreeFromEntries(localDir, entries);
+  const original = await runLocalGit(localDir, ["log", "-1", "--format=%B", sourceCommit], {
+    timeout: 10_000,
+    maxBuffer: 1024 * 1024,
+  });
+  const body = original.stdout.endsWith("\n") || original.stdout.length === 0
+    ? original.stdout
+    : `${original.stdout}\n`;
+  return await commitTree({
+    localDir,
+    tree,
+    message: `${body}\n${FILTERED_SNAPSHOT_TRAILER}: ${sourceCommit}\n`,
+    env: {
+      GIT_AUTHOR_NAME: "Paperclip",
+      GIT_AUTHOR_EMAIL: "noreply@paperclip.ing",
+      GIT_AUTHOR_DATE: FILTERED_SNAPSHOT_EPOCH,
+      GIT_COMMITTER_NAME: "Paperclip",
+      GIT_COMMITTER_EMAIL: "noreply@paperclip.ing",
+      GIT_COMMITTER_DATE: FILTERED_SNAPSHOT_EPOCH,
+    },
+  });
+}
+
+async function deleteLocalRefLog(localDir: string, ref: string): Promise<void> {
+  const [logPathResult, gitDirResult] = await Promise.all([
+    runLocalGit(localDir, ["rev-parse", "--git-path", `logs/${ref}`], { timeout: 10_000, maxBuffer: 16 * 1024 }),
+    runLocalGit(localDir, ["rev-parse", "--absolute-git-dir"], { timeout: 10_000, maxBuffer: 16 * 1024 }),
+  ]);
+  const gitDir = gitDirResult.stdout.trim();
+  const raw = logPathResult.stdout.trim();
+  if (!gitDir || !raw) return;
+  const logPath = path.resolve(localDir, raw);
+  const relative = path.relative(gitDir, logPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return;
+  await fs.rm(logPath, { force: true });
+}
+
+function filteredSnapshotSource(message: string): string | null {
+  const matches = [...message.matchAll(/^Paperclip-Filtered-Snapshot: ([0-9a-f]{40})$/gm)];
+  return matches.at(-1)?.[1] ?? null;
+}
+
+// Replay remote commits onto the local source commit recorded in the snapshot.
+// Returns the source commit when the remote made no commits, so the caller
+// leaves the local branch where it is. Histories that are not one of these
+// snapshots pass through unchanged.
+async function translateFilteredRemoteHead(localDir: string, importedHead: string): Promise<string> {
+  const roots = (await runLocalGit(localDir, ["rev-list", "--max-parents=0", importedHead], {
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  })).stdout.trim().split("\n").filter(Boolean);
+  if (roots.length !== 1 || !roots[0]) return importedHead;
+  const root = roots[0];
+  const message = (await runLocalGit(localDir, ["log", "-1", "--format=%B", root], {
+    timeout: 10_000,
+    maxBuffer: 1024 * 1024,
+  })).stdout;
+  const source = filteredSnapshotSource(message);
+  if (!source) return importedHead;
+  const sourceType = await runLocalGit(localDir, ["cat-file", "-t", source], {
+    timeout: 10_000,
+    maxBuffer: 16 * 1024,
+  }).catch(() => null);
+  if (sourceType?.stdout.trim() !== "commit") return importedHead;
+
+  const descendants = (await runLocalGit(localDir, ["rev-list", "--reverse", `${root}..${importedHead}`], {
+    timeout: 60_000,
+    maxBuffer: 4 * 1024 * 1024,
+  })).stdout.trim().split("\n").filter(Boolean);
+  if (descendants.length === 0) return source;
+
+  const secretEntries = (await listCommitEntries(localDir, source))
+    .filter((entry) => secretPathExcluded(entry.path));
+  let parent = source;
+  for (const commit of descendants) {
+    const remoteEntries = (await listCommitEntries(localDir, commit))
+      .filter((entry) => !secretPathExcluded(entry.path));
+    const seen = new Set(remoteEntries.map((entry) => entry.path));
+    const merged = [...remoteEntries];
+    for (const secret of secretEntries) {
+      if (!seen.has(secret.path)) merged.push(secret);
+    }
+    const tree = await writeTreeFromEntries(localDir, merged);
+    const metadata = (await runLocalGit(localDir, [
+      "log", "-1", "--format=%B%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI", commit,
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024 })).stdout.split("\0");
+    const [commitMessage, authorName, authorEmail, authorDate, committerName, committerEmail, committerDate] = metadata;
+    parent = await commitTree({
+      localDir,
+      tree,
+      parent,
+      message: commitMessage ?? "",
+      env: {
+        GIT_AUTHOR_NAME: authorName || "Paperclip",
+        GIT_AUTHOR_EMAIL: authorEmail || "noreply@paperclip.ing",
+        GIT_AUTHOR_DATE: authorDate || FILTERED_SNAPSHOT_EPOCH,
+        GIT_COMMITTER_NAME: committerName || "Paperclip",
+        GIT_COMMITTER_EMAIL: committerEmail || "noreply@paperclip.ing",
+        GIT_COMMITTER_DATE: committerDate || FILTERED_SNAPSHOT_EPOCH,
+      },
+    });
+  }
+  return parent;
+}
+
 async function importGitWorkspaceToSsh(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
@@ -966,7 +1276,10 @@ async function importGitWorkspaceToSsh(input: {
   const tempRef = `refs/paperclip/ssh-sync/import/${randomUUID()}`;
 
   try {
-    await runLocalGit(input.localDir, ["update-ref", tempRef, input.snapshot.headCommit], {
+    // Bundle the filtered snapshot only. Pointing the temporary ref at the
+    // local HEAD would pack every ancestor blob, including deny-listed files.
+    const snapshotCommit = await createFilteredSnapshotCommit(input.localDir, input.snapshot.headCommit);
+    await runLocalGit(input.localDir, ["update-ref", tempRef, snapshotCommit], {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     });
@@ -975,6 +1288,7 @@ async function importGitWorkspaceToSsh(input: {
       maxBuffer: 1024 * 1024,
     });
     const originUrl = await readSanitizedOriginRemoteUrl(input.localDir);
+    const remoteGit = path.posix.join(input.remoteDir, ".git");
 
     const remoteSetupScript = [
       "set -e",
@@ -982,12 +1296,14 @@ async function importGitWorkspaceToSsh(input: {
       `tmp_bundle=$(mktemp ${shellQuote(path.posix.join(input.remoteDir, ".paperclip-runtime", "import-XXXXXX.bundle"))})`,
       'trap \'rm -f "$tmp_bundle"\' EXIT',
       'cat > "$tmp_bundle"',
-      `if [ ! -d ${shellQuote(path.posix.join(input.remoteDir, ".git"))} ]; then git init ${shellQuote(input.remoteDir)} >/dev/null; fi`,
-      // Checkout materialises every tracked file, including ones the later tar
-      // overlay refuses to copy. Sparse-checkout is installed before checkout
-      // so deny-listed basenames are never written. Commit identity stays the
-      // same, so a later remote commit still restores onto the local branch.
-      // The blobs remain reachable from that commit inside .git.
+      // Replace any previous object store. A reused directory must not keep
+      // blobs, refs, or reflogs from an earlier copy.
+      `if [ -L ${shellQuote(remoteGit)} ]; then echo "refused symlink" >&2; exit 3; fi`,
+      `rm -rf -- ${shellQuote(remoteGit)}`,
+      `git init ${shellQuote(input.remoteDir)} >/dev/null`,
+      // Sparse-checkout and the sweep are a second line of defence so a
+      // deny-listed basename is not written into the work tree. The snapshot
+      // commit itself does not reference those blobs.
       ...sparseSecretCheckoutScript(input.remoteDir),
       // Carry the workspace's (credential-scrubbed) origin into the transported
       // repo so branches there keep a publishable remote instead of reading as
@@ -1000,13 +1316,16 @@ async function importGitWorkspaceToSsh(input: {
         : []),
       `git -C ${shellQuote(input.remoteDir)} fetch --force "$tmp_bundle" '${tempRef}:${tempRef}' >/dev/null`,
       input.snapshot.branchName
-        ? `git -C ${shellQuote(input.remoteDir)} checkout --force -B ${shellQuote(input.snapshot.branchName)} ${shellQuote(input.snapshot.headCommit)} >/dev/null`
-        : `git -C ${shellQuote(input.remoteDir)} -c advice.detachedHead=false checkout --force --detach ${shellQuote(input.snapshot.headCommit)} >/dev/null`,
-      `git -C ${shellQuote(input.remoteDir)} reset --hard ${shellQuote(input.snapshot.headCommit)} >/dev/null`,
+        ? `git -C ${shellQuote(input.remoteDir)} checkout --force -B ${shellQuote(input.snapshot.branchName)} ${shellQuote(tempRef)} >/dev/null`
+        : `git -C ${shellQuote(input.remoteDir)} -c advice.detachedHead=false checkout --force --detach ${shellQuote(tempRef)} >/dev/null`,
+      `git -C ${shellQuote(input.remoteDir)} reset --hard ${shellQuote(tempRef)} >/dev/null`,
       `git -C ${shellQuote(input.remoteDir)} clean -fdx -e .paperclip-runtime >/dev/null`,
       remoteSecretWorktreeSweep(input.remoteDir),
-      // Drop the per-import ref on the remote side too so it can't accumulate.
+      // Drop the import ref, its reflog, and any object the branch does not
+      // still reach, including the bundle's temporary pack residue.
       `git -C ${shellQuote(input.remoteDir)} update-ref -d ${shellQuote(tempRef)} >/dev/null 2>&1 || true`,
+      `git -C ${shellQuote(input.remoteDir)} reflog expire --expire=now --all >/dev/null`,
+      `git -C ${shellQuote(input.remoteDir)} gc --prune=now >/dev/null`,
     ].join("\n");
 
     // The git bundle is a real local file of known size, so report an exact
@@ -1039,6 +1358,7 @@ async function importGitWorkspaceToSsh(input: {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     }).catch(() => undefined);
+    await deleteLocalRefLog(input.localDir, tempRef).catch(() => undefined);
     await fs.rm(bundleDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
@@ -1096,17 +1416,21 @@ async function exportGitWorkspaceFromSsh(input: {
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
     });
+    const importedHead = (await runLocalGit(input.localDir, ["rev-parse", importedRef], {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024,
+    })).stdout.trim();
+    // A filtered snapshot has no local parent. Replay remote commits onto the
+    // recorded source commit before reset or merge so the local branch keeps
+    // its history and its deny-listed blobs.
+    const effectiveHead = await translateFilteredRemoteHead(input.localDir, importedHead);
     if (input.resetLocalWorkspace !== false) {
-      await runLocalGit(input.localDir, ["reset", "--hard", importedRef], {
+      await runLocalGit(input.localDir, ["reset", "--hard", effectiveHead], {
         timeout: 60_000,
         maxBuffer: 1024 * 1024,
       });
     }
-    const importedHead = await runLocalGit(input.localDir, ["rev-parse", importedRef], {
-      timeout: 10_000,
-      maxBuffer: 16 * 1024,
-    });
-    return importedHead.stdout.trim();
+    return effectiveHead;
   } finally {
     if (input.resetLocalWorkspace !== false) {
       await runLocalGit(input.localDir, ["update-ref", "-d", importedRef], {
@@ -1804,7 +2128,9 @@ export async function validateExistingRemoteWorkspace(input: {
   try {
     result = await runSshCommand(input.spec, script, { signal: input.signal, timeoutMs: 15_000 });
   } catch (error) {
-    if (error instanceof WorkspaceOperationAbortedError) throw error;
+    if (error instanceof WorkspaceOperationAbortedError || input.signal?.aborted) {
+      throw error instanceof WorkspaceOperationAbortedError ? error : new WorkspaceOperationAbortedError();
+    }
     throw new RemoteWorkspaceAttachError(
       `Remote workspace ${candidate} is not an existing directory inside ${root}.`,
       { cause: error },
@@ -2100,6 +2426,8 @@ export async function syncDirectoryFromSsh(input: {
   localDir: string;
   exclude?: string[];
   preserveLocalEntries?: string[];
+  /** Keep deny-listed files already on disk. The incoming archive omits them. */
+  preserveSecretFiles?: boolean;
   onProgress?: RuntimeProgressSink;
   progressLabel?: string;
   signal?: AbortSignal;
@@ -2200,7 +2528,11 @@ export async function syncDirectoryFromSsh(input: {
     });
     if (session.isAborting()) throw new WorkspaceOperationAbortedError();
     await progress?.finish();
-    await clearLocalDirectory(input.localDir, input.preserveLocalEntries);
+    await clearLocalDirectory(
+      input.localDir,
+      input.preserveLocalEntries,
+      input.preserveSecretFiles ? secretPathExcluded : undefined,
+    );
     await copyDirectoryContents(stagingDir, input.localDir);
   } catch (error) {
     if (!session.isAborting() && input.signal?.aborted) await session.cancel();
@@ -2435,6 +2767,7 @@ async function restoreWorkspaceRootFromSsh(input: {
       localDir: input.localDir,
       exclude: [".git", ".paperclip-runtime", ...secretTransferExcludes(), ...projectRepositoryEntries],
       preserveLocalEntries: [".git", ...projectRepositoryEntries],
+      preserveSecretFiles: true,
       onProgress: input.onProgress,
       progressLabel: input.progressLabel,
       signal: input.signal,
@@ -2447,6 +2780,7 @@ async function restoreWorkspaceRootFromSsh(input: {
     remoteDir,
     localDir: input.localDir,
     exclude: [".paperclip-runtime", ".git", ...secretTransferExcludes()],
+    preserveSecretFiles: true,
     onProgress: input.onProgress,
     progressLabel: input.progressLabel,
     signal: input.signal,

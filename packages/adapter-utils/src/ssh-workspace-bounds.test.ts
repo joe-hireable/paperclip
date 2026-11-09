@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createReadStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -34,13 +35,98 @@ async function createRoot(): Promise<string> {
   return rootDir;
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
+async function git(cwd: string, args: string[], maxBuffer = 1024 * 1024): Promise<string> {
   return await new Promise((resolve, reject) => {
-    execFile("git", ["-C", cwd, ...args], (error, stdout, stderr) => {
+    execFile("git", ["-C", cwd, ...args], { maxBuffer }, (error, stdout, stderr) => {
       if (error) reject(new Error((stderr || stdout || error.message).trim()));
       else resolve(stdout);
     });
   });
+}
+
+function assertMarkerAbsent(label: string, text: string, markers: readonly string[]): void {
+  for (const marker of markers) {
+    expect(text.includes(marker), `${label} still contains ${marker}`).toBe(false);
+  }
+}
+
+async function commandOutput(file: string, args: string[], maxBuffer = 16 * 1024 * 1024): Promise<{ code: number; stdout: string; stderr: string }> {
+  return await new Promise((resolve, reject) => {
+    execFile(file, args, { maxBuffer }, (error, stdout, stderr) => {
+      if (error && typeof error === "object" && "code" in error && typeof error.code === "number") {
+        resolve({ code: error.code, stdout: stdout ?? "", stderr: stderr ?? "" });
+        return;
+      }
+      if (error) reject(error);
+      else resolve({ code: 0, stdout: stdout ?? "", stderr: stderr ?? "" });
+    });
+  });
+}
+
+async function grepTree(root: string, marker: string): Promise<boolean> {
+  const result = await commandOutput("grep", ["-a", "-r", "-F", "-e", marker, "--", root]);
+  if (result.code === 1) return false;
+  if (result.code !== 0) throw new Error(result.stderr.trim() || `grep exited with code ${result.code}`);
+  return result.stdout.includes(marker);
+}
+
+async function gitStdin(cwd: string, args: string[], stdin: string): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn("git", ["-C", cwd, ...args], { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(stderr.trim() || stdout.trim() || `git exited with code ${code ?? -1}`));
+    });
+    child.stdin?.end(stdin);
+  });
+}
+
+async function bundledObjectText(repo: string): Promise<string> {
+  await git(repo, ["repack", "-ad"]);
+  const packDir = path.join(repo, ".git", "objects", "pack");
+  let names: string[] = [];
+  try {
+    names = (await readdir(packDir)).filter((name) => name.endsWith(".pack"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  expect(names.length).toBeGreaterThan(0);
+  const shas: string[] = [];
+  for (const name of names) {
+    const listing = await git(repo, ["verify-pack", "-v", path.join(packDir, name)], 16 * 1024 * 1024);
+    for (const line of listing.split("\n")) {
+      const match = /^([0-9a-f]{40}) /.exec(line);
+      if (match?.[1]) shas.push(match[1]);
+    }
+  }
+  expect(shas.length).toBeGreaterThan(0);
+  const packed = await gitStdin(repo, ["cat-file", "--batch"], `${shas.join("\n")}\n`);
+  const unpackRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-pack-"));
+  try {
+    await git(unpackRoot, ["init"]);
+    for (const name of names) {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn("git", ["-C", unpackRoot, "unpack-objects"], { stdio: ["pipe", "ignore", "pipe"] });
+        let stderr = "";
+        child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(stderr.trim() || `unpack-objects exited with code ${code ?? -1}`));
+        });
+        createReadStream(path.join(packDir, name)).pipe(child.stdin!);
+      });
+    }
+    const unpacked = await git(unpackRoot, ["cat-file", "--batch", "--batch-all-objects"], 32 * 1024 * 1024);
+    return `${packed}\n${unpacked}`;
+  } finally {
+    await rm(unpackRoot, { recursive: true, force: true });
+  }
 }
 
 async function authTempNames(): Promise<string[]> {
@@ -673,5 +759,153 @@ await runSshCommand(spec, "sleep 5");
       }
     }
     expect(leaked).toEqual([]);
+  }, TEST_TIMEOUT_MS);
+
+  it("does not ship committed secret history and still restores a remote edit and commit", async () => {
+    const historical = "HISTORICAL_ENV_MARKER_7f3a9c";
+    const headSecret = "HEAD_ENV_MARKER_7f3a9c";
+    const nestedSecret = "NESTED_CRED_MARKER_7f3a9c";
+    const branchSecret = "OTHER_BRANCH_CRED_MARKER_7f3a9c";
+    const oldNote = "OLD_NOTE_MARKER_7f3a9c";
+    const markers = [historical, headSecret, nestedSecret, branchSecret, oldNote];
+    const rootDir = await createRoot();
+    const started = await startFixture(rootDir, "committed secret history");
+    if (!started) return;
+    const localDir = path.join(rootDir, "local");
+    await mkdir(path.join(localDir, "src"), { recursive: true });
+    await mkdir(path.join(localDir, "config"), { recursive: true });
+    await git(localDir, ["init"]);
+    await git(localDir, ["checkout", "-b", "main"]);
+    await git(localDir, ["config", "user.name", "Paperclip Test"]);
+    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localDir, "notes.txt"), `${oldNote}\n`);
+    await writeFile(path.join(localDir, ".env.production"), `${historical}\n`);
+    await writeFile(path.join(localDir, ".env.retired"), `${historical}\n`);
+    await git(localDir, ["add", "notes.txt", ".env.production", ".env.retired"]);
+    await git(localDir, ["commit", "-m", "historical secrets"]);
+    await writeFile(path.join(localDir, "notes.txt"), "current note\n");
+    await writeFile(path.join(localDir, "src", "keep.txt"), "local keep\n");
+    await writeFile(path.join(localDir, ".env.production"), `${headSecret}\n`);
+    await writeFile(path.join(localDir, "config", "credentials.json"), `${nestedSecret}\n`);
+    await rm(path.join(localDir, ".env.retired"));
+    await git(localDir, ["add", "-A"]);
+    await git(localDir, ["commit", "-m", "current snapshot"]);
+    await git(localDir, ["checkout", "-b", "other"]);
+    await writeFile(path.join(localDir, "credentials.json"), `${branchSecret}\n`);
+    await git(localDir, ["add", "credentials.json"]);
+    await git(localDir, ["commit", "-m", "other branch secret"]);
+    await git(localDir, ["checkout", "main"]);
+    const original = (await git(localDir, ["rev-parse", "HEAD"])).trim();
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: specFor(config, started.workspaceDir),
+      runId: "run-secret-history",
+      adapterKey: "codex",
+      workspaceLocalDir: localDir,
+    });
+    const remote = prepared.workspaceRemoteDir;
+
+    expect(await readFile(path.join(remote, "src", "keep.txt"), "utf8")).toBe("local keep\n");
+    expect(await readFile(path.join(remote, "notes.txt"), "utf8")).toBe("current note\n");
+    expect((await git(remote, ["rev-list", "--count", "--all"])).trim()).toBe("1");
+    await expect(git(remote, ["cat-file", "-e", "HEAD:.env.production"])).rejects.toThrow();
+    for (const marker of markers) {
+      expect(await grepTree(remote, marker), `grep found ${marker}`).toBe(false);
+    }
+    const history = await git(remote, ["log", "--all", "--reflog", "-p"], 16 * 1024 * 1024);
+    assertMarkerAbsent("git log", history, markers);
+    const objects = await git(remote, ["cat-file", "--batch", "--batch-all-objects"], 32 * 1024 * 1024);
+    assertMarkerAbsent("git objects", objects, markers);
+    assertMarkerAbsent("packed objects", await bundledObjectText(remote), markers);
+    const names = await readdir(remote, { recursive: true });
+    expect(names.filter((name) => String(name).endsWith(".bundle"))).toEqual([]);
+
+    await runSshCommand(
+      config,
+      [
+        `cd ${shellQuote(remote)}`,
+        `git config user.name "Paperclip SSH"`,
+        `git config user.email "ssh@paperclip.dev"`,
+        `printf 'shipped from remote\\n' > shipped.txt`,
+        `git add shipped.txt`,
+        `git commit -m "remote shipped file" >/dev/null`,
+        `printf 'dirty from remote\\n' > src/keep.txt`,
+      ].join(" && "),
+      { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
+    );
+
+    await prepared.restoreWorkspace();
+
+    expect(await readFile(path.join(localDir, "src", "keep.txt"), "utf8")).toBe("dirty from remote\n");
+    expect(await readFile(path.join(localDir, "shipped.txt"), "utf8")).toBe("shipped from remote\n");
+    expect(await readFile(path.join(localDir, ".env.production"), "utf8")).toBe(`${headSecret}\n`);
+    expect(await readFile(path.join(localDir, "config", "credentials.json"), "utf8")).toBe(`${nestedSecret}\n`);
+    expect(await git(localDir, ["cat-file", "-p", `${original}:.env.production`])).toContain(headSecret);
+    expect(await git(localDir, ["cat-file", "-p", `${original}^:.env.retired`])).toContain(historical);
+    expect(await git(localDir, ["merge-base", "--is-ancestor", original, "HEAD"])).toBe("");
+    expect((await git(localDir, ["log", "-1", "--pretty=%s"])).trim()).toBe("remote shipped file");
+    expect(await git(localDir, ["status", "--short"])).not.toContain(".env");
+    expect(await git(localDir, ["status", "--short"])).not.toContain("credentials.json");
+    expect(await git(localDir, ["log", "--all", "-p"], 16 * 1024 * 1024)).toContain(historical);
+  }, 60_000);
+
+  it("reports cancel when attach validation is aborted while it is running", async () => {
+    const rootDir = await createRoot();
+    const started = await startFixture(rootDir, "abort attach validation");
+    if (!started) return;
+    const remoteTree = path.join(started.workspaceDir, "existing-worktree");
+    const localDir = path.join(rootDir, "local");
+    const binDir = path.join(rootDir, "bin");
+    await mkdir(remoteTree, { recursive: true });
+    await mkdir(localDir, { recursive: true });
+    await mkdir(binDir, { recursive: true });
+    await writeFile(path.join(remoteTree, "canary.txt"), "remote\n");
+    await writeFile(path.join(localDir, "SHOULD_NOT_UPLOAD.txt"), "local\n");
+    const realSsh = (await commandOutput("bash", ["-lc", "command -v ssh"])).stdout.trim();
+    const flag = path.join(rootDir, "ssh-started");
+    await writeFile(path.join(binDir, "ssh"), `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    *pwd\\ -P*)
+      printf '%s\\n' "$$" > ${shellQuote(flag)}
+      exec sleep 30
+      ;;
+  esac
+done
+exec ${shellQuote(realSsh)} "$@"
+`, { mode: 0o755 });
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+    const pending = prepareRemoteManagedRuntime({
+      spec: specFor(config, started.workspaceDir),
+      runId: "run-abort-attach",
+      adapterKey: "codex",
+      workspaceLocalDir: localDir,
+      attachExistingRemoteCwd: { remoteCwd: remoteTree, allowedRoot: started.workspaceDir },
+      signal: controller.signal,
+    });
+    let early: unknown = null;
+    pending.then(() => { early = new Error("attach resolved before abort"); }, (error) => { early = error; });
+    try {
+      await waitFor(() => pathExists(flag), 10_000);
+      if (early) throw early;
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ code: "WORKSPACE_SYNC_ABORTED" });
+      expect(await readFile(path.join(remoteTree, "canary.txt"), "utf8")).toBe("remote\n");
+      await expect(stat(path.join(remoteTree, "SHOULD_NOT_UPLOAD.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(path.join(localDir, "SHOULD_NOT_UPLOAD.txt"), "utf8")).toBe("local\n");
+      expect(await pathExists(remoteTree)).toBe(true);
+    } finally {
+      process.env.PATH = previousPath;
+      controller.abort();
+      const pid = Number.parseInt((await readFile(flag, "utf8").catch(() => "")).trim(), 10);
+      if (pid > 1) {
+        try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await pending.catch(() => undefined);
+    }
   }, TEST_TIMEOUT_MS);
 });
