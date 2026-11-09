@@ -11,6 +11,7 @@ const {
   restoreWorkspaceFromSshExecution,
   runSshCommand,
   syncDirectoryToSsh,
+  validateExistingRemoteWorkspace,
   startAdapterExecutionTargetPaperclipBridge,
 } = vi.hoisted(() => ({
   runChildProcess: vi.fn(async () => ({
@@ -28,6 +29,7 @@ const {
   restoreWorkspaceFromSshExecution: vi.fn(async () => undefined),
   runSshCommand: vi.fn(async (_spec: unknown, _command: string) => ({ stdout: Buffer.from("{}").toString("base64"), stderr: "" })),
   syncDirectoryToSsh: vi.fn(async () => undefined),
+  validateExistingRemoteWorkspace: vi.fn(async (input: { remoteCwd: string }) => input.remoteCwd),
   startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => ({
     env: {
       PAPERCLIP_API_URL: "http://127.0.0.1:4310",
@@ -60,6 +62,7 @@ vi.mock("@paperclipai/adapter-utils/ssh", async () => {
     restoreWorkspaceFromSshExecution,
     runSshCommand,
     syncDirectoryToSsh,
+    validateExistingRemoteWorkspace,
   };
 });
 
@@ -625,6 +628,132 @@ describe("codex remote execution", () => {
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_AUTHORITATIVE_ROOT).toBe("/app");
     expect(call?.[3].env.CODEX_HOME).toBe("/app/.paperclip-runtime/codex/home");
     expect(call?.[3].remoteExecution?.remoteCwd).toBe("/app");
+  });
+
+  it("attaches an explicit shared remote cwd without uploading controller source", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-attach-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(workspaceDir, "SHOULD_NOT_UPLOAD.txt"), "local only\n", "utf8");
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+    const remoteCwd = "/srv/existing-worktree";
+
+    await execute({
+      runId: "run-attach",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        engine: "cli",
+        command: "codex",
+        cwd: remoteCwd,
+        env: { CODEX_HOME: codexHomeDir },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+          mode: "shared_workspace",
+          strategy: "project_primary",
+        },
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "ssh",
+        remoteCwd: "/srv",
+        spec: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/srv",
+          remoteCwd: "/srv",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(validateExistingRemoteWorkspace).toHaveBeenCalledTimes(1);
+    expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+    expect(syncDirectoryToSsh).toHaveBeenCalledTimes(1);
+    const homeSyncArgs = (syncDirectoryToSsh.mock.calls[0] as unknown[])?.[0] as { localDir: string; remoteDir: string };
+    expect(homeSyncArgs.localDir).not.toBe(workspaceDir);
+    expect(homeSyncArgs.remoteDir.startsWith(`${remoteCwd}/.paperclip-runtime/`)).toBe(true);
+    const call = runChildProcess.mock.calls[0] as unknown as
+      | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
+      | undefined;
+    expect(call?.[3].env.PAPERCLIP_WORKSPACE_REALIZATION_MODE).toBe("in_place");
+    expect(call?.[3].env.PAPERCLIP_WORKSPACE_AUTHORITATIVE_ROOT).toBe(remoteCwd);
+    expect(call?.[3].remoteExecution?.remoteCwd).toBe(remoteCwd);
+  });
+
+  it("fails before any upload when the explicit remote cwd cannot be attached", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-attach-missing-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+    validateExistingRemoteWorkspace.mockRejectedValueOnce(Object.assign(
+      new Error("Remote workspace is not an existing directory inside the environment root."),
+      { code: "REMOTE_WORKSPACE_UNAVAILABLE" },
+    ));
+
+    await expect(execute({
+      runId: "run-attach-missing",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        engine: "cli",
+        command: "codex",
+        cwd: "/srv/missing-worktree",
+        env: { CODEX_HOME: codexHomeDir },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: workspaceDir,
+          source: "project_primary",
+          executionWorkspacePreference: "reuse_existing",
+        },
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "ssh",
+        remoteCwd: "/srv",
+        spec: {
+          host: "127.0.0.1",
+          port: 2222,
+          username: "fixture",
+          remoteWorkspacePath: "/srv",
+          remoteCwd: "/srv",
+          privateKey: "PRIVATE KEY",
+          knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    })).rejects.toMatchObject({ code: "REMOTE_WORKSPACE_UNAVAILABLE" });
+
+    expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+    expect(syncDirectoryToSsh).not.toHaveBeenCalled();
+    expect(runChildProcess).not.toHaveBeenCalled();
   });
 
   it("reselects the full assignment and bootstrap guidance after a failed resume", async () => {
