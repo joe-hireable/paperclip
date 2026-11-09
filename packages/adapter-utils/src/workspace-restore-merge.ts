@@ -241,6 +241,10 @@ function entriesMatch(left: SnapshotEntry | null | undefined, right: SnapshotEnt
   return false;
 }
 
+function fileHash(entry: SnapshotEntry | null | undefined): string | null {
+  return entry?.kind === "file" ? entry.hash : null;
+}
+
 function directorySnapshotsMatch(left: DirectorySnapshot, right: DirectorySnapshot): boolean {
   if (left.entries.size !== right.entries.size) return false;
   for (const [relative, entry] of right.entries) {
@@ -815,8 +819,17 @@ export async function mergeDirectoryWithBaseline(input: {
           });
         }
         for (const [relative, entry] of orderedEntries(source)) {
-          if (!entriesMatch(input.baseline.entries.get(relative), entry) &&
-              !(input.conflictPolicy === "reject" && entriesMatch(current.entries.get(relative), entry))) await copySnapshotEntry(input.sourceDir, canonicalTargetDir, relative, entry);
+          const baselineEntry = input.baseline.entries.get(relative);
+          if (entriesMatch(baselineEntry, entry)) continue;
+          if (input.conflictPolicy === "reject" && entriesMatch(current.entries.get(relative), entry)) continue;
+          // Tar extract applies the receiver's umask, so a file the remote did
+          // not edit can still differ by mode. Replacing it would discard a
+          // local edit or deletion made after the baseline.
+          const remoteBytes = fileHash(entry);
+          if (remoteBytes !== null && remoteBytes === fileHash(baselineEntry) && fileHash(current.entries.get(relative)) !== remoteBytes) {
+            continue;
+          }
+          await copySnapshotEntry(input.sourceDir, canonicalTargetDir, relative, entry);
         }
         await input.afterApply?.();
       } finally { await disposeDirectorySnapshot(current); }

@@ -296,6 +296,7 @@ async function execFileText(
     timeout?: number;
     maxBuffer?: number;
     signal?: AbortSignal;
+    env?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<SshCommandResult> {
   return await new Promise<SshCommandResult>((resolve, reject) => {
@@ -306,6 +307,7 @@ async function execFileText(
         timeout: options.timeout ?? 15_000,
         maxBuffer: options.maxBuffer ?? 1024 * 128,
         signal: options.signal,
+        env: options.env,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -462,6 +464,8 @@ function gitCommandEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   delete env.GIT_DIR;
   delete env.GIT_WORK_TREE;
   if (!extra?.GIT_INDEX_FILE) delete env.GIT_INDEX_FILE;
+  if (!extra?.GIT_OBJECT_DIRECTORY) delete env.GIT_OBJECT_DIRECTORY;
+  if (!extra?.GIT_ALTERNATE_OBJECT_DIRECTORIES) delete env.GIT_ALTERNATE_OBJECT_DIRECTORIES;
   return env;
 }
 
@@ -476,7 +480,11 @@ async function runLocalGit(
   } = {},
 ): Promise<SshCommandResult> {
   if (options.stdin == null && options.env == null) {
-    return await execFileText("git", ["-C", localDir, ...args], options);
+    return await execFileText("git", ["-C", localDir, ...args], {
+      timeout: options.timeout,
+      maxBuffer: options.maxBuffer,
+      env: gitCommandEnv(),
+    });
   }
   const maxBuffer = options.maxBuffer ?? 1024 * 128;
   return await new Promise<SshCommandResult>((resolve, reject) => {
@@ -871,7 +879,7 @@ async function readLocalGitWorkspaceSnapshot(localDir: string): Promise<LocalGit
       return null;
     }
 
-    const [headCommitResult, branchResult, deletedResult] = await Promise.all([
+    const [headCommitResult, branchResult, deletedResult, stagedDeletedResult] = await Promise.all([
       runLocalGit(localDir, ["rev-parse", "HEAD"], {
         timeout: 10_000,
         maxBuffer: 16 * 1024,
@@ -880,20 +888,29 @@ async function readLocalGitWorkspaceSnapshot(localDir: string): Promise<LocalGit
         timeout: 10_000,
         maxBuffer: 16 * 1024,
       }),
+      // Unstaged deletions are still in the index. Staged deletions (`git rm`)
+      // are not, but the snapshot checkout would otherwise resurrect them.
       runLocalGit(localDir, ["ls-files", "--deleted", "-z"], {
+        timeout: 10_000,
+        maxBuffer: 256 * 1024,
+      }),
+      runLocalGit(localDir, ["diff", "--cached", "--name-only", "--diff-filter=D", "-z"], {
         timeout: 10_000,
         maxBuffer: 256 * 1024,
       }),
     ]);
 
     const branchName = branchResult.stdout.trim();
-    return {
-      headCommit: headCommitResult.stdout.trim(),
-      branchName: branchName && branchName !== "HEAD" ? branchName : null,
-      deletedPaths: deletedResult.stdout
+    const deletedPaths = [...new Set(
+      `${deletedResult.stdout}${stagedDeletedResult.stdout}`
         .split("\0")
         .map((entry) => entry.trim())
         .filter(Boolean),
+    )];
+    return {
+      headCommit: headCommitResult.stdout.trim(),
+      branchName: branchName && branchName !== "HEAD" ? branchName : null,
+      deletedPaths,
     };
   } catch {
     return null;
@@ -1180,20 +1197,6 @@ async function createFilteredSnapshotCommit(localDir: string, sourceCommit: stri
   });
 }
 
-async function deleteLocalRefLog(localDir: string, ref: string): Promise<void> {
-  const [logPathResult, gitDirResult] = await Promise.all([
-    runLocalGit(localDir, ["rev-parse", "--git-path", `logs/${ref}`], { timeout: 10_000, maxBuffer: 16 * 1024 }),
-    runLocalGit(localDir, ["rev-parse", "--absolute-git-dir"], { timeout: 10_000, maxBuffer: 16 * 1024 }),
-  ]);
-  const gitDir = gitDirResult.stdout.trim();
-  const raw = logPathResult.stdout.trim();
-  if (!gitDir || !raw) return;
-  const logPath = path.resolve(localDir, raw);
-  const relative = path.relative(gitDir, logPath);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return;
-  await fs.rm(logPath, { force: true });
-}
-
 function filteredSnapshotSource(message: string): string | null {
   const matches = [...message.matchAll(/^Paperclip-Filtered-Snapshot: ([0-9a-f]{40})$/gm)];
   return matches.at(-1)?.[1] ?? null;
@@ -1262,6 +1265,31 @@ async function translateFilteredRemoteHead(localDir: string, importedHead: strin
   return parent;
 }
 
+async function resolveGitPath(localDir: string, name: string): Promise<string> {
+  const raw = (await runLocalGit(localDir, ["rev-parse", "--git-path", name], {
+    timeout: 10_000,
+    maxBuffer: 16 * 1024,
+  })).stdout.trim();
+  return path.resolve(localDir, raw);
+}
+
+// The filtered snapshot commit is disposable packaging for the bundle. Write
+// it in a temporary repository that borrows the local object store read-only,
+// so the caller's repo does not keep an unreferenced commit or tree.
+async function createIsolatedSnapshotRepo(localDir: string): Promise<string> {
+  const repo = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-snapshot-"));
+  try {
+    await runLocalGit(repo, ["init", "--quiet"], { timeout: 10_000, maxBuffer: 16 * 1024 });
+    const infoDir = path.join(await resolveGitPath(repo, "objects"), "info");
+    await fs.mkdir(infoDir, { recursive: true });
+    await fs.writeFile(path.join(infoDir, "alternates"), `${await resolveGitPath(localDir, "objects")}\n`, { mode: 0o600 });
+    return repo;
+  } catch (error) {
+    await fs.rm(repo, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 async function importGitWorkspaceToSsh(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
@@ -1271,19 +1299,21 @@ async function importGitWorkspaceToSsh(input: {
 }): Promise<void> {
   const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-bundle-"));
   const bundlePath = path.join(bundleDir, "workspace.bundle");
-  // Per-import unique ref so concurrent imports against the same local repo
-  // can't race on `update-ref` between this run's update and bundle create.
+  // Per-import unique ref. The ref lives only in the temporary snapshot
+  // repository, so concurrent imports do not share a local ref or object.
   const tempRef = `refs/paperclip/ssh-sync/import/${randomUUID()}`;
+  let snapshotRepo: string | null = null;
 
   try {
+    snapshotRepo = await createIsolatedSnapshotRepo(input.localDir);
     // Bundle the filtered snapshot only. Pointing the temporary ref at the
     // local HEAD would pack every ancestor blob, including deny-listed files.
-    const snapshotCommit = await createFilteredSnapshotCommit(input.localDir, input.snapshot.headCommit);
-    await runLocalGit(input.localDir, ["update-ref", tempRef, snapshotCommit], {
+    const snapshotCommit = await createFilteredSnapshotCommit(snapshotRepo, input.snapshot.headCommit);
+    await runLocalGit(snapshotRepo, ["update-ref", tempRef, snapshotCommit], {
       timeout: 10_000,
       maxBuffer: 16 * 1024,
     });
-    await runLocalGit(input.localDir, ["bundle", "create", bundlePath, tempRef], {
+    await runLocalGit(snapshotRepo, ["bundle", "create", bundlePath, tempRef], {
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
     });
@@ -1354,11 +1384,7 @@ async function importGitWorkspaceToSsh(input: {
       throw error;
     }
   } finally {
-    await runLocalGit(input.localDir, ["update-ref", "-d", tempRef], {
-      timeout: 10_000,
-      maxBuffer: 16 * 1024,
-    }).catch(() => undefined);
-    await deleteLocalRefLog(input.localDir, tempRef).catch(() => undefined);
+    if (snapshotRepo) await fs.rm(snapshotRepo, { recursive: true, force: true }).catch(() => undefined);
     await fs.rm(bundleDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
@@ -2686,6 +2712,153 @@ export async function restoreWorkspaceFromSshExecution(input: {
   });
 }
 
+interface GitStage {
+  mode: string;
+  sha: string;
+}
+
+interface StagedDivergence {
+  path: string;
+  head: GitStage | null;
+  index: GitStage | null;
+}
+
+function parseIndexStages(stdout: string): Array<GitStage & { stage: string; path: string }> {
+  const entries: Array<GitStage & { stage: string; path: string }> = [];
+  for (const record of stdout.split("\0")) {
+    if (!record) continue;
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, sha, stage] = record.slice(0, tab).split(" ");
+    const filePath = record.slice(tab + 1);
+    if (!mode || !sha || !filePath) continue;
+    entries.push({ mode, sha, stage: stage ?? "0", path: filePath });
+  }
+  return entries;
+}
+
+function sameGitStage(left: GitStage | null, right: GitStage | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.mode === right.mode && left.sha === right.sha;
+}
+
+function stageMap(entries: readonly GitIndexEntry[]): Map<string, GitStage> {
+  return new Map(entries.map((entry) => [entry.path, { mode: entry.mode, sha: entry.sha }]));
+}
+
+async function listIndexStages(localDir: string): Promise<Array<GitStage & { stage: string; path: string }>> {
+  const listed = await runLocalGit(localDir, ["ls-files", "--stage", "-z"], {
+    timeout: 60_000,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  return parseIndexStages(listed.stdout);
+}
+
+async function readStagedDivergences(localDir: string, headCommit: string): Promise<StagedDivergence[]> {
+  const stages = await listIndexStages(localDir);
+  if (stages.some((entry) => entry.stage !== "0")) {
+    throw new Error("Cannot restore the workspace because the local git index has unresolved conflicts.");
+  }
+  const index = new Map(stages.map((entry) => [entry.path, { mode: entry.mode, sha: entry.sha }]));
+  const head = stageMap(await listCommitEntries(localDir, headCommit));
+  const divergences: StagedDivergence[] = [];
+  for (const filePath of new Set([...index.keys(), ...head.keys()])) {
+    const indexStage = index.get(filePath) ?? null;
+    const headStage = head.get(filePath) ?? null;
+    if (!sameGitStage(indexStage, headStage)) {
+      divergences.push({ path: filePath, head: headStage, index: indexStage });
+    }
+  }
+  return divergences;
+}
+
+function conflictingStagedPaths(divergences: readonly StagedDivergence[], next: Map<string, GitStage>): string[] {
+  const conflicts: string[] = [];
+  for (const divergence of divergences) {
+    const nextStage = next.get(divergence.path) ?? null;
+    if (sameGitStage(nextStage, divergence.head) || sameGitStage(nextStage, divergence.index)) continue;
+    conflicts.push(divergence.path);
+  }
+  return conflicts.sort();
+}
+
+function assertStagedChangesReconcilable(divergences: readonly StagedDivergence[], next: Map<string, GitStage>): void {
+  const conflicts = conflictingStagedPaths(divergences, next);
+  if (conflicts.length === 0) return;
+  throw new Error(`Cannot reconcile local staged changes with the restored git history: ${conflicts.join(", ")}`);
+}
+
+// The tree integrateImportedGitHead would publish, or null when that call
+// leaves the branch where it is or when the merge itself will fail closed.
+async function predictedRestoredTree(localDir: string, currentHead: string, importedHead: string): Promise<string | null> {
+  if (currentHead === importedHead) return null;
+  let noCommonAncestor = false;
+  const mergeBase = await runLocalGit(localDir, ["merge-base", currentHead, importedHead], {
+    timeout: 10_000,
+    maxBuffer: 16 * 1024,
+  }).catch((error: unknown) => {
+    noCommonAncestor = (error as { code?: unknown } | null)?.code === 1;
+    return null;
+  });
+  const mergeBaseHead = mergeBase?.stdout.trim() ?? "";
+  if (mergeBaseHead === importedHead) return null;
+  if (mergeBaseHead === currentHead || noCommonAncestor) {
+    return (await runLocalGit(localDir, ["rev-parse", `${importedHead}^{tree}`], {
+      timeout: 10_000,
+      maxBuffer: 16 * 1024,
+    })).stdout.trim();
+  }
+  if (!mergeBase) return null;
+  try {
+    const merged = await runLocalGit(localDir, ["merge-tree", "--write-tree", currentHead, importedHead], {
+      timeout: 60_000,
+      maxBuffer: 256 * 1024,
+    });
+    return merged.stdout.trim().split("\n")[0]?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// `update-ref` moves the branch and leaves the index on the previous HEAD.
+// A later commit would then record every restored path as a staged deletion.
+// Reset the index to the published HEAD, then put back staged entries whose
+// committed blob did not change.
+async function alignLocalGitIndex(localDir: string, capturedHead: string, divergences: readonly StagedDivergence[]): Promise<void> {
+  const newHead = (await runLocalGit(localDir, ["rev-parse", "HEAD"], {
+    timeout: 10_000,
+    maxBuffer: 16 * 1024,
+  })).stdout.trim();
+  if (newHead === capturedHead) return;
+  const next = stageMap(await listCommitEntries(localDir, newHead));
+  assertStagedChangesReconcilable(divergences, next);
+  try {
+    await runLocalGit(localDir, ["reset", "--quiet", "HEAD", "--", "."], {
+      timeout: 60_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to reset the local git index to HEAD after workspace restore: ${reason}`);
+  }
+  const restorations: string[] = [];
+  for (const divergence of divergences) {
+    const nextStage = next.get(divergence.path) ?? null;
+    if (!sameGitStage(nextStage, divergence.head)) continue;
+    if (divergence.index === null) {
+      restorations.push(`0 0000000000000000000000000000000000000000 0\t${divergence.path}\0`);
+    } else {
+      restorations.push(`${divergence.index.mode} ${divergence.index.sha} 0\t${divergence.path}\0`);
+    }
+  }
+  if (restorations.length === 0) return;
+  await runLocalGit(localDir, ["update-index", "-z", "--index-info"], {
+    timeout: 60_000,
+    maxBuffer: 1024 * 1024,
+    stdin: restorations.join(""),
+  });
+}
+
 async function restoreWorkspaceRootFromSsh(input: {
   spec: SshRemoteExecutionSpec;
   localDir: string;
@@ -2724,6 +2897,8 @@ async function restoreWorkspaceRootFromSsh(input: {
         progressLabel: input.progressLabel,
         signal: input.signal,
       });
+      let capturedHead: string | null = null;
+      let stagedDivergences: StagedDivergence[] = [];
       await mergeDirectoryWithBaseline({
         baseline: input.baselineSnapshot,
         sourceDir: stagingDir,
@@ -2731,12 +2906,31 @@ async function restoreWorkspaceRootFromSsh(input: {
         signal: input.signal,
         // Git history advances via integrateImportedGitHead; the working tree
         // still comes from the remote file snapshot so dirty remote edits win.
+        // The index is aligned afterwards: update-ref does not move it.
         beforeApply: importedHead
           ? async () => {
+            const snapshot = await readLocalGitWorkspaceSnapshot(input.localDir);
+            if (!snapshot?.headCommit) {
+              throw new Error("Cannot restore git history because the local directory is not a git work tree.");
+            }
+            capturedHead = snapshot.headCommit;
+            stagedDivergences = await readStagedDivergences(input.localDir, snapshot.headCommit);
+            if (stagedDivergences.length > 0) {
+              const tree = await predictedRestoredTree(input.localDir, snapshot.headCommit, importedHead);
+              if (tree) {
+                assertStagedChangesReconcilable(stagedDivergences, stageMap(await listCommitEntries(input.localDir, tree)));
+              }
+            }
             await integrateImportedGitHead({
               localDir: input.localDir,
               importedHead,
             });
+          }
+          : undefined,
+        afterApply: importedHead
+          ? async () => {
+            if (!capturedHead) return;
+            await alignLocalGitIndex(input.localDir, capturedHead, stagedDivergences);
           }
           : undefined,
       });

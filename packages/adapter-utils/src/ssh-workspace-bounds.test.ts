@@ -847,7 +847,248 @@ await runSshCommand(spec, "sleep 5");
     expect((await git(localDir, ["log", "-1", "--pretty=%s"])).trim()).toBe("remote shipped file");
     expect(await git(localDir, ["status", "--short"])).not.toContain(".env");
     expect(await git(localDir, ["status", "--short"])).not.toContain("credentials.json");
+    expect(await git(localDir, ["diff", "--cached", "--name-status"])).not.toContain("shipped.txt");
+    expect(await git(localDir, ["ls-files", "--", "shipped.txt"])).toContain("shipped.txt");
+    expect(await git(localDir, ["status", "--porcelain"])).toContain(" M src/keep.txt");
     expect(await git(localDir, ["log", "--all", "-p"], 16 * 1024 * 1024)).toContain(historical);
+  }, 60_000);
+
+  it("points the local index at a remote commit so a later commit keeps the file", async () => {
+    const rootDir = await createRoot();
+    const started = await startFixture(rootDir, "remote commit index");
+    if (!started) return;
+    const localDir = path.join(rootDir, "local");
+    await mkdir(path.join(localDir, "src"), { recursive: true });
+    await git(localDir, ["init"]);
+    await git(localDir, ["checkout", "-b", "main"]);
+    await git(localDir, ["config", "user.name", "Paperclip Test"]);
+    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localDir, "src", "mod0.ts"), "base\n");
+    await git(localDir, ["add", "src/mod0.ts"]);
+    await git(localDir, ["commit", "-m", "initial"]);
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: specFor(config, started.workspaceDir),
+      runId: "run-remote-commit",
+      adapterKey: "codex",
+      workspaceLocalDir: localDir,
+    });
+    expect(await git(localDir, ["fsck"])).not.toMatch(/dangling commit/);
+    await runSshCommand(
+      config,
+      [
+        `cd ${shellQuote(prepared.workspaceRemoteDir)}`,
+        `git config user.name "Paperclip SSH"`,
+        `git config user.email "ssh@paperclip.dev"`,
+        `printf 'from remote\\n' > src/remote-commit.ts`,
+        `git add src/remote-commit.ts`,
+        `git commit -m "remote add file" >/dev/null`,
+      ].join(" && "),
+      { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
+    );
+
+    await prepared.restoreWorkspace();
+
+    expect(await readFile(path.join(localDir, "src", "remote-commit.ts"), "utf8")).toBe("from remote\n");
+    expect(await git(localDir, ["status", "--porcelain"])).toBe("");
+    expect(await git(localDir, ["diff", "--cached", "--name-status"])).toBe("");
+    expect(await git(localDir, ["ls-files", "--", "src/remote-commit.ts"])).toContain("src/remote-commit.ts");
+    await expect(git(localDir, ["commit", "-m", "must not delete the restored file"])).rejects.toThrow(/nothing to commit/);
+    expect(await git(localDir, ["ls-tree", "-r", "--name-only", "HEAD"])).toContain("src/remote-commit.ts");
+    await git(localDir, ["add", "-A"]);
+    expect(await git(localDir, ["diff", "--cached", "--name-status"])).not.toContain("src/remote-commit.ts");
+    expect(await git(localDir, ["cat-file", "-e", "HEAD:src/remote-commit.ts"])).toBe("");
+  }, 60_000);
+
+  it("keeps a remote uncommitted edit unstaged and the committed file in the index", async () => {
+    const rootDir = await createRoot();
+    const started = await startFixture(rootDir, "remote commit and dirty edit");
+    if (!started) return;
+    const localDir = path.join(rootDir, "local");
+    await mkdir(path.join(localDir, "src"), { recursive: true });
+    await git(localDir, ["init"]);
+    await git(localDir, ["checkout", "-b", "main"]);
+    await git(localDir, ["config", "user.name", "Paperclip Test"]);
+    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localDir, "src", "mod0.ts"), "base\n");
+    await git(localDir, ["add", "src/mod0.ts"]);
+    await git(localDir, ["commit", "-m", "initial"]);
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: specFor(config, started.workspaceDir),
+      runId: "run-remote-dirty",
+      adapterKey: "codex",
+      workspaceLocalDir: localDir,
+    });
+    await runSshCommand(
+      config,
+      [
+        `cd ${shellQuote(prepared.workspaceRemoteDir)}`,
+        `git config user.name "Paperclip SSH"`,
+        `git config user.email "ssh@paperclip.dev"`,
+        `printf 'from remote\\n' > src/remote-commit.ts`,
+        `git add src/remote-commit.ts`,
+        `git commit -m "remote add file" >/dev/null`,
+        `printf 'remote dirty\\n' > src/mod0.ts`,
+      ].join(" && "),
+      { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
+    );
+
+    await prepared.restoreWorkspace();
+
+    expect(await readFile(path.join(localDir, "src", "remote-commit.ts"), "utf8")).toBe("from remote\n");
+    expect(await readFile(path.join(localDir, "src", "mod0.ts"), "utf8")).toBe("remote dirty\n");
+    expect(await git(localDir, ["status", "--porcelain"])).toBe(" M src/mod0.ts\n");
+    expect(await git(localDir, ["diff", "--cached", "--name-status"])).toBe("");
+    expect(await git(localDir, ["ls-files", "--", "src/remote-commit.ts"])).toContain("src/remote-commit.ts");
+    await git(localDir, ["add", "-A"]);
+    await git(localDir, ["commit", "-m", "follow-up"]);
+    expect(await git(localDir, ["ls-tree", "-r", "--name-only", "HEAD"])).toContain("src/remote-commit.ts");
+    expect(await git(localDir, ["show", "HEAD:src/remote-commit.ts"])).toBe("from remote\n");
+    expect(await git(localDir, ["show", "HEAD:src/mod0.ts"])).toBe("remote dirty\n");
+  }, 60_000);
+
+  it("preserves local staged, unstaged, and untracked work and deny-listed bytes", async () => {
+    const rootDir = await createRoot();
+    const started = await startFixture(rootDir, "preserve local git state");
+    if (!started) return;
+    const localDir = path.join(rootDir, "local");
+    await mkdir(path.join(localDir, "src"), { recursive: true });
+    await mkdir(path.join(localDir, "config"), { recursive: true });
+    await git(localDir, ["init"]);
+    await git(localDir, ["checkout", "-b", "main"]);
+    await git(localDir, ["config", "user.name", "Paperclip Test"]);
+    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localDir, "src", "mod0.ts"), "base\n");
+    await writeFile(path.join(localDir, "src", "staged.ts"), "base staged\n");
+    await writeFile(path.join(localDir, "src", "unstaged.ts"), "base unstaged\n");
+    await writeFile(path.join(localDir, "src", "during.ts"), "base during\n");
+    await writeFile(path.join(localDir, "src", "remove-me.ts"), "remove me\n");
+    await writeFile(path.join(localDir, "src", "promote.ts"), "base promote\n");
+    await writeFile(path.join(localDir, ".env.production"), "TRACKED_ENV_CANARY\n");
+    await writeFile(path.join(localDir, "config", "credentials.json"), "NESTED_CRED_CANARY\n");
+    await git(localDir, ["add", "-A"]);
+    await git(localDir, ["commit", "-m", "initial"]);
+    await writeFile(path.join(localDir, "src", "staged.ts"), "local staged\n");
+    await git(localDir, ["add", "src/staged.ts"]);
+    await writeFile(path.join(localDir, "src", "promote.ts"), "promote me\n");
+    await git(localDir, ["add", "src/promote.ts"]);
+    await git(localDir, ["rm", "src/remove-me.ts"]);
+    await writeFile(path.join(localDir, "src", "unstaged.ts"), "local unstaged\n");
+    await writeFile(path.join(localDir, "src", "untracked.ts"), "local untracked\n");
+    await writeFile(path.join(localDir, ".env"), "UNTRACKED_ENV_CANARY\n");
+    await writeFile(path.join(localDir, ".npmrc"), "UNTRACKED_NPM_CANARY\n");
+    await writeFile(path.join(localDir, "id_rsa"), "UNTRACKED_RSA_CANARY\n");
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: specFor(config, started.workspaceDir),
+      runId: "run-preserve-local",
+      adapterKey: "codex",
+      workspaceLocalDir: localDir,
+    });
+    await writeFile(path.join(localDir, "src", "during.ts"), "during staged\n");
+    await git(localDir, ["add", "src/during.ts"]);
+    await runSshCommand(
+      config,
+      [
+        `cd ${shellQuote(prepared.workspaceRemoteDir)}`,
+        `git config user.name "Paperclip SSH"`,
+        `git config user.email "ssh@paperclip.dev"`,
+        `printf 'from remote\\n' > src/remote-commit.ts`,
+        `git add src/remote-commit.ts src/promote.ts`,
+        `git commit -m "remote add file" >/dev/null`,
+        `printf 'remote dirty\\n' > src/mod0.ts`,
+      ].join(" && "),
+      { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
+    );
+    await prepared.restoreWorkspace();
+
+    expect(await readFile(path.join(localDir, "src", "remote-commit.ts"), "utf8")).toBe("from remote\n");
+    expect(await readFile(path.join(localDir, "src", "mod0.ts"), "utf8")).toBe("remote dirty\n");
+    expect(await readFile(path.join(localDir, "src", "staged.ts"), "utf8")).toBe("local staged\n");
+    expect(await readFile(path.join(localDir, "src", "unstaged.ts"), "utf8")).toBe("local unstaged\n");
+    expect(await readFile(path.join(localDir, "src", "during.ts"), "utf8")).toBe("during staged\n");
+    expect(await readFile(path.join(localDir, "src", "promote.ts"), "utf8")).toBe("promote me\n");
+    expect(await readFile(path.join(localDir, "src", "untracked.ts"), "utf8")).toBe("local untracked\n");
+    await expect(stat(path.join(localDir, "src", "remove-me.ts"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(path.join(localDir, ".env.production"), "utf8")).toBe("TRACKED_ENV_CANARY\n");
+    expect(await readFile(path.join(localDir, "config", "credentials.json"), "utf8")).toBe("NESTED_CRED_CANARY\n");
+    expect(await readFile(path.join(localDir, ".env"), "utf8")).toBe("UNTRACKED_ENV_CANARY\n");
+    expect(await readFile(path.join(localDir, ".npmrc"), "utf8")).toBe("UNTRACKED_NPM_CANARY\n");
+    expect(await readFile(path.join(localDir, "id_rsa"), "utf8")).toBe("UNTRACKED_RSA_CANARY\n");
+    const status = (await git(localDir, ["status", "--porcelain"])).split("\n").filter(Boolean).sort();
+    expect(status).toEqual([
+      " M src/mod0.ts",
+      " M src/unstaged.ts",
+      "?? .env",
+      "?? .npmrc",
+      "?? id_rsa",
+      "?? src/untracked.ts",
+      "D  src/remove-me.ts",
+      "M  src/during.ts",
+      "M  src/staged.ts",
+    ].sort());
+    expect(await git(localDir, ["diff", "--cached", "--name-status"])).not.toContain("remote-commit.ts");
+    expect(await git(localDir, ["diff", "--cached", "--name-status"])).not.toContain(".env");
+    expect(await git(localDir, ["diff", "--name-status"])).not.toContain(".env");
+    expect(await git(localDir, ["ls-files", "--", "src/remote-commit.ts"])).toContain("src/remote-commit.ts");
+    await git(localDir, ["add", "-A"]);
+    await git(localDir, ["commit", "-m", "follow-up"]);
+    const headFiles = await git(localDir, ["ls-tree", "-r", "--name-only", "HEAD"]);
+    expect(headFiles).toContain("src/remote-commit.ts");
+    expect(headFiles).not.toContain("src/remove-me.ts");
+    expect(await git(localDir, ["show", "HEAD:src/remote-commit.ts"])).toBe("from remote\n");
+    expect(await readFile(path.join(localDir, ".env.production"), "utf8")).toBe("TRACKED_ENV_CANARY\n");
+    expect(await readFile(path.join(localDir, ".env"), "utf8")).toBe("UNTRACKED_ENV_CANARY\n");
+  }, 60_000);
+
+  it("refuses to restore when a local staged edit conflicts with a remote commit", async () => {
+    const rootDir = await createRoot();
+    const started = await startFixture(rootDir, "staged conflict");
+    if (!started) return;
+    const localDir = path.join(rootDir, "local");
+    await mkdir(path.join(localDir, "src"), { recursive: true });
+    await git(localDir, ["init"]);
+    await git(localDir, ["checkout", "-b", "main"]);
+    await git(localDir, ["config", "user.name", "Paperclip Test"]);
+    await git(localDir, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localDir, "src", "mod0.ts"), "base\n");
+    await writeFile(path.join(localDir, ".env"), "UNTRACKED_ENV_CANARY\n");
+    await git(localDir, ["add", "src/mod0.ts"]);
+    await git(localDir, ["commit", "-m", "initial"]);
+    const original = (await git(localDir, ["rev-parse", "HEAD"])).trim();
+    await writeFile(path.join(localDir, "src", "mod0.ts"), "local staged\n");
+    await git(localDir, ["add", "src/mod0.ts"]);
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: specFor(config, started.workspaceDir),
+      runId: "run-staged-conflict",
+      adapterKey: "codex",
+      workspaceLocalDir: localDir,
+    });
+    await runSshCommand(
+      config,
+      [
+        `cd ${shellQuote(prepared.workspaceRemoteDir)}`,
+        `git config user.name "Paperclip SSH"`,
+        `git config user.email "ssh@paperclip.dev"`,
+        `printf 'remote committed\\n' > src/mod0.ts`,
+        `git add src/mod0.ts`,
+        `git commit -m "remote rewrote mod0" >/dev/null`,
+      ].join(" && "),
+      { timeoutMs: 30_000, maxBuffer: 256 * 1024 },
+    );
+
+    await expect(prepared.restoreWorkspace()).rejects.toThrow(/src\/mod0\.ts/);
+    expect((await git(localDir, ["rev-parse", "HEAD"])).trim()).toBe(original);
+    expect(await readFile(path.join(localDir, "src", "mod0.ts"), "utf8")).toBe("local staged\n");
+    expect(await readFile(path.join(localDir, ".env"), "utf8")).toBe("UNTRACKED_ENV_CANARY\n");
+    expect(await git(localDir, ["diff", "--cached", "--name-status"])).toContain("src/mod0.ts");
+    expect(await git(localDir, ["status", "--porcelain"])).not.toContain(localDir);
   }, 60_000);
 
   it("reports cancel when attach validation is aborted while it is running", async () => {

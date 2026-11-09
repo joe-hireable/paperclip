@@ -99,6 +99,42 @@ async function assertIncomingChange(change: string) {
 it.each(["hash", "kind", "rename", "add", "delete"])("does not skip an incoming %s change", assertIncomingChange);
 it.skipIf(process.platform === "win32")("does not skip an incoming mode change", () => assertIncomingChange("mode"));
 
+it("keeps a later local edit when the incoming file only differs by mode", async () => {
+  const f = await fixture(false);
+  await fs.chmod(path.join(f.source, "file"), 0o644);
+  await fs.writeFile(path.join(f.target, "file"), "local edit");
+  const incoming = await captureDirectorySnapshot(f.source);
+  try {
+    await mergeDirectoryWithBaseline({
+      baseline: f.baseline,
+      sourceDir: f.source,
+      targetDir: f.target,
+      snapshots: { source: incoming },
+    });
+    expect(await fs.readFile(path.join(f.target, "file"), "utf8")).toBe("local edit");
+  } finally {
+    await disposeDirectorySnapshot(incoming);
+  }
+});
+
+it("keeps a later local deletion when the incoming file only differs by mode", async () => {
+  const f = await fixture(false);
+  await fs.chmod(path.join(f.source, "file"), 0o644);
+  await fs.rm(path.join(f.target, "file"));
+  const incoming = await captureDirectorySnapshot(f.source);
+  try {
+    await mergeDirectoryWithBaseline({
+      baseline: f.baseline,
+      sourceDir: f.source,
+      targetDir: f.target,
+      snapshots: { source: incoming },
+    });
+    await expect(fs.stat(path.join(f.target, "file"))).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await disposeDirectorySnapshot(incoming);
+  }
+});
+
 it.skipIf(process.platform === "win32")("does not skip a changed symlink target", async () => {
   const f = await fixture(false);
   await fs.rm(path.join(f.target, "file")); await fs.rm(path.join(f.source, "file"));

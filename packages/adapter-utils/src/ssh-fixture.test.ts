@@ -1112,6 +1112,7 @@ describe("ssh env-lab fixture", () => {
       .toBe("from run a\n");
     await expect(readFile(path.join(localRepo, "manual-qa/environment-matrix/ssh/codex_local.md"), "utf8")).resolves
       .toBe("from run b\n");
+    expect(await git(localRepo, ["diff", "--cached", "--name-status"])).toBe("");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("round-trips remote git commits through the managed runtime restore path", async () => {
@@ -1153,6 +1154,8 @@ describe("ssh env-lab fixture", () => {
 
     expect(await git(localRepo, ["log", "-1", "--pretty=%s"])).toBe("remote update");
     await expect(readFile(path.join(localRepo, "tracked.txt"), "utf8")).resolves.toBe("dirty remote\n");
+    expect(await git(localRepo, ["diff", "--cached", "--name-status"])).toBe("");
+    expect(await git(localRepo, ["diff", "--name-status", "HEAD"])).toBe("M\ttracked.txt");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("propagates remote commits to the local worktree with no git remote configured (no-remote-git contract)", async () => {
@@ -1270,6 +1273,9 @@ describe("ssh env-lab fixture", () => {
     await expect(readFile(path.join(localRepo, "run-a.txt"), "utf8")).resolves.toBe("from run a\n");
     await expect(readFile(path.join(localRepo, "run-b.txt"), "utf8")).resolves.toBe("from run b\n");
     expect(await git(localRepo, ["log", "-1", "--pretty=%s"])).toContain("Paperclip SSH sync merge");
+    expect(await git(localRepo, ["diff", "--cached", "--name-status"])).toBe("");
+    expect(await git(localRepo, ["ls-files", "--", "run-a.txt"])).toBe("run-a.txt");
+    expect(await git(localRepo, ["ls-files", "--", "run-b.txt"])).toBe("run-b.txt");
 
     const recentSubjects = await git(localRepo, ["log", "--pretty=%s", "-3"]);
     expect(recentSubjects).toContain("remote update a");
